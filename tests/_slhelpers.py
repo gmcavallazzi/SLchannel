@@ -38,3 +38,38 @@ def report(name, ok, detail=""):
     status = "PASS" if ok else "FAIL"
     print(f"[{status}] {name}  {detail}")
     return ok
+
+
+def make_config_file(tmpdir, *, nx=16, ny=16, nz=32,
+                     Lx=6.283185307179586, Ly=6.283185307179586, Lz=2.0,
+                     Re=1000.0, Re_tau=180.0, U_bulk=1.0, gamma=1.5,
+                     dt=0.01, t_max=1e9, n_steps=10**9,
+                     scheme='sl', init_type='vortices', pert=0.05,
+                     extra=None, name='config.yaml'):
+    """Write a minimal slChannel YAML config for solver-level tests (CPU)."""
+    import yaml, os
+    cfg = {
+        'grid': {'nx': nx, 'ny': ny, 'nz': nz},
+        'domain': {'Lx': Lx, 'Ly': Ly, 'Lz': Lz},
+        'flow': {'Re': Re, 'Re_tau': Re_tau, 'U_bulk': U_bulk, 'gamma': gamma},
+        'initialization': {'type': init_type, 'perturbation_intensity': pert,
+                           'n_vortices': 2},
+        'solver': {'type': 'fft'},
+        'time': {'dt': dt, 'n_steps': n_steps, 't_max': t_max,
+                 'CFL_target': 3.0, 'dt_update_interval': 0,
+                 'dt_max': 10 * dt, 'dt_min': dt / 100, 'scheme': 'IMEX'},
+        'compute': {'device': 'cpu'},
+        'output': {'results_folder': os.path.join(tmpdir, 'results'),
+                   'n_out': 10**8, 'n_save': 10**8},
+        'advection': {'scheme': scheme},
+        'sl': {'interp_order': 4, 'n_traj_iters': 2, 'time_scheme': 'v1',
+               'interp_dtype': 'fp64'},
+        'statistics': {'n_stats': 0},
+    }
+    if extra:
+        for section, values in extra.items():
+            cfg.setdefault(section, {}).update(values)
+    path = os.path.join(tmpdir, name)
+    with open(path, 'w') as f:
+        yaml.safe_dump(cfg, f)
+    return path

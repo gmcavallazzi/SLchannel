@@ -104,10 +104,12 @@ class SLAdvector:
 
     def __init__(self, nx, ny, nz, dx, dy, Lx, Ly, Lz,
                  z_f, z_c, gamma, stretching_type='symmetric',
-                 order=4, n_traj_iters=2, top_wall_bc_type='dirichlet',
+                 order=4, traj_order=2, n_traj_iters=2, top_wall_bc_type='dirichlet',
                  interp_dtype='fp64', device=torch.device('cpu')):
         if order not in (4, 6):
             raise ValueError(f"sl.interp_order must be 4 (tricubic) or 6 (triquintic), got {order}")
+        if traj_order not in (2, 4):
+            raise ValueError(f"sl.traj_interp_order must be 2 (trilinear) or 4 (tricubic), got {traj_order}")
         if stretching_type not in ('symmetric', 'bottom'):
             raise ValueError(f"SLAdvector supports 'symmetric'/'bottom' stretching, got '{stretching_type}'")
         if interp_dtype not in ('fp64', 'fp32_accum64'):
@@ -121,6 +123,12 @@ class SLAdvector:
         self.gamma = float(gamma)
         self.stretching_type = stretching_type
         self.order = order
+        # Spatial order of the trajectory-velocity sampling. Trilinear (2) is
+        # cheap but its C^0 interpolant caps the whole scheme at O(dt) with a
+        # small h^2-proportional coefficient (the flow map of the interpolated
+        # velocity differs from the exact one); tricubic (4) restores clean
+        # O(dt^2) for accuracy studies at ~4x the trajectory-sampling cost.
+        self.traj_order = traj_order
         self.n_traj_iters = n_traj_iters
         self.top_wall_bc_type = top_wall_bc_type
         self.interp_dtype = interp_dtype
@@ -140,8 +148,8 @@ class SLAdvector:
         # v: nodes x = (i+1/2)*dx,       y = j*dy,               z = z_c
         # w: nodes x = (i+1/2)*dx,       y = (j+1/2)*dy,         z = z_f (walls incl.)
         def make_spec(name, shift_x, shift_y, znodes, ztype):
-            denoms = {2: _z_denominator_table(znodes, 2),
-                      order: _z_denominator_table(znodes, order)}
+            denoms = {o: _z_denominator_table(znodes, o)
+                      for o in {2, traj_order, order}}
             return _GridSpec(name, shift_x, shift_y, nx, ny, len(znodes),
                              znodes, ztype, denoms)
 
@@ -152,8 +160,8 @@ class SLAdvector:
         }
 
         # Uniform-direction inverse denominators (python floats, baked into weights)
-        self._udenom = {2: _uniform_inv_denominators(2),
-                        order: _uniform_inv_denominators(order)}
+        self._udenom = {o: _uniform_inv_denominators(o)
+                        for o in {2, traj_order, order}}
 
         # --- arrival coordinates (broadcastable, physical) -------------------
         ar = torch.arange(1, nx + 1, dtype=torch.float64, device=device)
@@ -326,11 +334,12 @@ class SLAdvector:
         return acc
 
     def _sample(self, comp, x, y, z):
-        """Trilinear sample of the trajectory (mid) velocity component `comp`
-        at arbitrary points. Input tensors share one broadcast shape."""
+        """Sample the trajectory (mid) velocity component `comp` at arbitrary
+        points (order = self.traj_order). Inputs share one broadcast shape."""
         shape = x.shape
         iw = self._build_iw(self.spec[comp], x.reshape(-1), y.reshape(-1),
-                            torch.clamp(z, self.z_lo, self.z_hi).reshape(-1), 2)
+                            torch.clamp(z, self.z_lo, self.z_hi).reshape(-1),
+                            self.traj_order)
         return self._apply_iw(self.mbuf[comp], iw).reshape(shape)
 
     # ------------------------------------------------------------------
@@ -377,9 +386,10 @@ class SLAdvector:
         field interpolated at the departure points (ghosts are NOT refreshed
         here; call apply_bc afterwards). w wall faces stay 0.
 
-        extra_rhs: optional (Ru, Rv, Rw) ghost-shaped fields interpolated at the
-        SAME departure points (for the v2 scheme); returned as a fourth tuple of
-        interior-shaped tensors.
+        extra_rhs: optional LIST of (Ru, Rv, Rw) ghost-shaped field triples,
+        each interpolated at the SAME departure points (used by the v2 scheme
+        for the explicit RHS and the departure-half of the z-diffusion);
+        returned as a fourth element: a list of interior-shaped triples.
         """
         # Trajectory velocity node buffers
         self._fill(self.mbuf['u'], 'u', u_mid)
@@ -388,12 +398,10 @@ class SLAdvector:
 
         fields = {'u': u, 'v': v, 'w': w}
         outs = {'u': self.ustar, 'v': self.vstar, 'w': self.wstar}
-        extras = {} if extra_rhs is not None else None
-        if extra_rhs is not None:
-            extra_map = {'u': extra_rhs[0], 'v': extra_rhs[1], 'w': extra_rhs[2]}
+        extras = [dict() for _ in extra_rhs] if extra_rhs is not None else None
 
         n_clamped = torch.zeros((), dtype=torch.int64, device=self.device)
-        for comp in 'uvw':
+        for ic, comp in enumerate('uvw'):
             iw = self.compute_departure(comp, dt_t)
             self.last_iw[comp] = iw
             n_clamped += iw.n_clamped
@@ -403,19 +411,19 @@ class SLAdvector:
 
             shape = self.arrival[comp][3]
             out = outs[comp]
-            if comp == 'u':
-                out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] = vals.reshape(shape)
-            elif comp == 'v':
-                out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] = vals.reshape(shape)
-            else:
+            if comp == 'w':
                 out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz] = vals.reshape(shape)
+            else:
+                out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] = vals.reshape(shape)
 
             if extras is not None:
-                self._fill(self.fbuf[comp], comp, extra_map[comp])
-                extras[comp] = self._apply_iw(self.fbuf[comp], iw).reshape(shape)
+                for t, triple in enumerate(extra_rhs):
+                    self._fill(self.fbuf[comp], comp, triple[ic])
+                    extras[t][comp] = self._apply_iw(self.fbuf[comp], iw).reshape(shape)
 
         self.n_clamped_last = n_clamped
 
         if extras is not None:
-            return self.ustar, self.vstar, self.wstar, (extras['u'], extras['v'], extras['w'])
+            return self.ustar, self.vstar, self.wstar, \
+                [(e['u'], e['v'], e['w']) for e in extras]
         return self.ustar, self.vstar, self.wstar
