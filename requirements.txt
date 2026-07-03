@@ -1,0 +1,12 @@
+# TorChannel Requirements
+# GPU-accelerated DNS for turbulent channel flow
+
+# Core dependencies
+torch>=1.10.0
+numpy>=1.20.0
+matplotlib>=3.3.0
+pyyaml>=5.4.0
+
+# Optional: For better plotting
+# Uncomment if you have LaTeX installed
+# latex
