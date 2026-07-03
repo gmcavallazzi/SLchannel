@@ -34,8 +34,27 @@ Design notes
   is accumulated per step as a diagnostic (self.n_clamped_last).
 """
 
+import os
 import torch
 from dataclasses import dataclass
+
+
+def _gather_interp(Ff, ix_lin, iy_lin, kz0, wx, wy, wz):
+    """Tensor-product gather-and-sum, written as a fully unrolled pointwise
+    expression so torch.compile fuses it into ONE kernel (no materialized
+    (N, order^3) intermediates). This is the performance-critical kernel:
+    on the GB10 the compiled fp32 version runs ~40x faster than fp64
+    (fp64 throughput is 1/64 of fp32 on consumer Blackwell)."""
+    order = wx.shape[1]
+    out = None
+    for i in range(order):
+        for j in range(order):
+            base = ix_lin[:, i] + iy_lin[:, j] + kz0
+            wij = wx[:, i] * wy[:, j]
+            for k in range(order):
+                term = (wij * wz[:, k]) * Ff[base + k]
+                out = term if out is None else out + term
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -77,13 +96,17 @@ class _GridSpec:
 
 def _z_denominator_table(znodes: torch.Tensor, order: int) -> torch.Tensor:
     """Inverse Lagrange denominators for every contiguous stencil of `order`
-    nodes: denom_inv[b, m] = 1 / prod_{l != m} (z[b+m] - z[b+l])."""
-    zn = znodes.unfold(0, order, 1)                    # (n_base, order)
+    nodes: denom_inv[b, m] = 1 / prod_{l != m} (z[b+m] - z[b+l]).
+
+    Computed on CPU (torch.prod on CUDA fp64 goes through an NVRTC-JIT
+    reduction kernel that fails on the GB10/sm_121), then moved to the
+    node tensor's device. Init-time only, so the round-trip is free."""
+    device = znodes.device
+    zn = znodes.cpu().unfold(0, order, 1)              # (n_base, order)
     diff = zn.unsqueeze(2) - zn.unsqueeze(1)           # [b, m, l] = z_m - z_l
-    n_base = diff.shape[0]
-    eye = torch.eye(order, dtype=diff.dtype, device=diff.device)
+    eye = torch.eye(order, dtype=diff.dtype)
     diff = diff + eye.unsqueeze(0)                     # 1 on the diagonal
-    return 1.0 / diff.prod(dim=2)
+    return (1.0 / diff.prod(dim=2)).to(device)
 
 
 def _uniform_inv_denominators(order: int) -> list:
@@ -143,15 +166,28 @@ class SLAdvector:
         self.z_lo = (z_f[0] + eps_z).item()
         self.z_hi = (z_f[-1] - eps_z).item()
 
+        # In fp32_accum64 mode the ENTIRE interpolation pipeline runs in fp32:
+        # node buffers, coordinates, weights, and the trajectory math. On the
+        # GB10 fp64 throughput is 1/64 of fp32, and the coordinate/weight math
+        # (floor, remainder, atanh, Lagrange products) is what dominates the
+        # semi-Lagrangian cost — fp64 there is ~40x slower for accuracy far
+        # below the scheme's truncation error (positions good to ~1e-7*L).
+        self._buf_dtype = (torch.float32 if interp_dtype == 'fp32_accum64'
+                           else torch.float64)
+        self._coord_dtype = self._buf_dtype
+
         # --- node-grid specs -------------------------------------------------
         # u: nodes x = i*dx (i=0..nx-1), y = (j+1/2)*dy (j=0..ny-1), z = z_c (ghosts incl.)
         # v: nodes x = (i+1/2)*dx,       y = j*dy,               z = z_c
         # w: nodes x = (i+1/2)*dx,       y = (j+1/2)*dy,         z = z_f (walls incl.)
+        # znodes/denominator tables are stored in the coordinate dtype (the
+        # denominators are COMPUTED in fp64 first — near-wall spacings are
+        # small — then cast).
         def make_spec(name, shift_x, shift_y, znodes, ztype):
-            denoms = {o: _z_denominator_table(znodes, o)
+            denoms = {o: _z_denominator_table(znodes, o).to(self._coord_dtype)
                       for o in {2, traj_order, order}}
             return _GridSpec(name, shift_x, shift_y, nx, ny, len(znodes),
-                             znodes, ztype, denoms)
+                             znodes.to(self._coord_dtype), ztype, denoms)
 
         self.spec = {
             'u': make_spec('u', 0.0, -0.5, z_c, 'centers'),
@@ -164,14 +200,14 @@ class SLAdvector:
                         for o in {2, traj_order, order}}
 
         # --- arrival coordinates (broadcastable, physical) -------------------
-        ar = torch.arange(1, nx + 1, dtype=torch.float64, device=device)
-        aj = torch.arange(1, ny + 1, dtype=torch.float64, device=device)
+        ar = torch.arange(1, nx + 1, dtype=self._coord_dtype, device=device)
+        aj = torch.arange(1, ny + 1, dtype=self._coord_dtype, device=device)
         x_face = (ar * dx).view(nx, 1, 1)
         x_cent = ((ar - 0.5) * dx).view(nx, 1, 1)
         y_face = (aj * dy).view(1, ny, 1)
         y_cent = ((aj - 0.5) * dy).view(1, ny, 1)
-        z_cent = z_c[1:nz + 1].view(1, 1, nz)
-        z_facei = z_f[1:nz].view(1, 1, nz - 1)   # interior faces only; walls pinned w=0
+        z_cent = z_c[1:nz + 1].to(self._coord_dtype).view(1, 1, nz)
+        z_facei = z_f[1:nz].to(self._coord_dtype).view(1, 1, nz - 1)   # interior faces; walls pinned w=0
 
         self.arrival = {
             'u': (x_face, y_cent, z_cent, (nx, ny, nz)),
@@ -179,10 +215,55 @@ class SLAdvector:
             'w': (x_cent, y_cent, z_facei, (nx, ny, nz - 1)),
         }
 
+        # --- compiled fast path -----------------------------------------------
+        # Opt-in via TORCHANNEL_COMPILE=1 (repo convention; needs CC=gcc on the
+        # GB10). The gather kernel and the stencil build are compiled; the
+        # eager path remains the bit-exact reference used by the CPU tests.
+        self._use_compiled = (os.environ.get("TORCHANNEL_COMPILE", "0") == "1"
+                              and device.type == 'cuda')
+        if self._use_compiled:
+            from torch import _dynamo as _torch_dynamo
+            from torch import _inductor
+            _torch_dynamo.config.cache_size_limit = 64
+            # keep multi-use pointwise intermediates virtual (recompute instead
+            # of materializing (N, order) weight tensors): ~3x on this workload
+            _inductor.config.realize_reads_threshold = 10**9
+            _inductor.config.realize_opcount_threshold = 10**9
+            # ONE fused graph per component: arrival coords -> midpoint
+            # trajectory iterations (inline trilinear gathers) -> stencil
+            # build -> high-order gather. Everything is pointwise per output
+            # element, so the (N, order) index/weight tensors stay virtual
+            # (register-resident) instead of costing ~10 GB of traffic per
+            # interpolation at production size.
+            self._gather_c = torch.compile(_gather_interp, dynamic=False)
+            self._dep_c = torch.compile(self._compute_departure_impl, dynamic=False)
+            self._advect_c = torch.compile(self._advect_comp_impl, dynamic=False)
+        else:
+            self._gather_c = None
+            self._dep_c = None
+            self._advect_c = None
+
+        # Hand-written Triton kernels: the fastest path (weights/indices fully
+        # register-resident). Used automatically for the fp32 pipeline with
+        # trilinear trajectories on CUDA; disable with SLCHANNEL_TRITON=0.
+        self._triton = None
+        if (device.type == 'cuda' and interp_dtype == 'fp32_accum64'
+                and traj_order == 2
+                and os.environ.get("SLCHANNEL_TRITON", "1") == "1"):
+            try:
+                from semilag_triton import TritonSL
+                self._triton = TritonSL(self)
+            except Exception as e:
+                print(f"[semilag] Triton fast path unavailable ({e}); "
+                      f"falling back to torch.compile/eager", flush=True)
+        # index dtype: int32 halves index traffic on the compiled path (flat
+        # indices stay < 2^31 for any realistic grid)
+        self._idx_dtype = torch.int32 if self._use_compiled else torch.int64
+
         # --- persistent node buffers -----------------------------------------
         # One set for the advected fields, one for the trajectory (mid) velocity.
         def alloc(spec):
-            return torch.empty(spec.NX, spec.NY, spec.NZ, dtype=torch.float64, device=device)
+            return torch.empty(spec.NX, spec.NY, spec.NZ, dtype=self._buf_dtype, device=device)
 
         self.fbuf = {c: alloc(self.spec[c]) for c in 'uvw'}
         self.mbuf = {c: alloc(self.spec[c]) for c in 'uvw'}
@@ -195,8 +276,11 @@ class SLAdvector:
         # Diagnostics: departure points clamped at the walls, last step
         self.n_clamped_last = torch.zeros((), dtype=torch.int64, device=device)
 
-        # Last departure stencils (reused for extra-field interpolation, v2)
+        # Last departure stencils (eager path only; the fused fast path never
+        # materializes them)
         self.last_iw = {}
+        # node buffers for extra RHS fields (v2), allocated on first use
+        self._ebuf = []
 
     # ------------------------------------------------------------------
     # Node-buffer filling (views of the ghost-shaped fields)
@@ -281,6 +365,11 @@ class SLAdvector:
         x, y may be unwrapped (any real); z must lie inside [z_lo, z_hi] unless
         count_clamp=True, in which case it is clamped here and counted.
         """
+        ix_lin, iy_lin, kz0, wx, wy, wz, n_clamped = \
+            self._build_iw_impl(spec, x, y, z, order, count_clamp)
+        return IndexWeights(ix_lin, iy_lin, kz0, wx, wy, wz, order, n_clamped)
+
+    def _build_iw_impl(self, spec, x, y, z, order, count_clamp):
         if count_clamp:
             n_clamped = ((z < self.z_lo) | (z > self.z_hi)).sum()
             z = torch.clamp(z, self.z_lo, self.z_hi)
@@ -289,58 +378,50 @@ class SLAdvector:
 
         offs = torch.arange(order, device=x.device) - (order // 2 - 1)
 
+        # coordinates/weights in fp64 (near-wall z spacings are small), then
+        # cast weights to the buffer dtype and indices to the index dtype
         sx = x / self.dx + spec.shift_x
         ix0 = sx.floor()
         tx = sx - ix0
         ix = torch.remainder(ix0.long().unsqueeze(1) + offs, spec.NX)
-        ix_lin = ix * (spec.NY * spec.NZ)
-        wx = self._uniform_weights(tx, order)
+        ix_lin = (ix * (spec.NY * spec.NZ)).to(self._idx_dtype)
+        wx = self._uniform_weights(tx, order).to(self._buf_dtype)
 
         sy = y / self.dy + spec.shift_y
         iy0 = sy.floor()
         ty = sy - iy0
         iy = torch.remainder(iy0.long().unsqueeze(1) + offs, spec.NY)
-        iy_lin = iy * spec.NZ
-        wy = self._uniform_weights(ty, order)
+        iy_lin = (iy * spec.NZ).to(self._idx_dtype)
+        wy = self._uniform_weights(ty, order).to(self._buf_dtype)
 
         m0 = self._locate_z(z, spec)
         k0 = torch.clamp(m0 - (order // 2 - 1), 0, spec.NZ - order)
-        wz = self._z_weights(z, k0, spec, order)
+        wz = self._z_weights(z, k0, spec, order).to(self._buf_dtype)
 
-        return IndexWeights(ix_lin, iy_lin, k0, wx, wy, wz, order, n_clamped)
+        return ix_lin, iy_lin, k0.to(self._idx_dtype), wx, wy, wz, n_clamped
 
     def _apply_iw(self, buf, iw):
-        """Tensor-product gather-and-sum: interpolate `buf` at the stencils in `iw`."""
-        order = iw.order
-        F = buf.reshape(-1)
-        ar = torch.arange(order, device=F.device)
-        lowp = (self.interp_dtype == 'fp32_accum64' and order == self.order)
-        if lowp:
-            F = F.float()
-            wx, wy, wz = iw.wx.float(), iw.wy.float(), iw.wz.float()
-        else:
-            wx, wy, wz = iw.wx, iw.wy, iw.wz
-        acc = torch.zeros(iw.kz0.shape[0], dtype=torch.float64, device=F.device)
-        for i in range(order):
-            for j in range(order):
-                idx = iw.ix_lin[:, i] + iw.iy_lin[:, j] + iw.kz0
-                g = F[idx.unsqueeze(1) + ar]           # (N, order), z-contiguous
-                inner = (g * wz).sum(dim=1)
-                pref = wx[:, i] * wy[:, j]
-                if lowp:
-                    acc += (pref * inner).double()
-                else:
-                    acc += pref * inner
-        return acc
+        """Interpolate `buf` at the stencils in `iw` (fused kernel when
+        compiled; eager reference loop otherwise)."""
+        Ff = buf.reshape(-1)
+        if self._gather_c is not None:
+            return self._gather_c(Ff, iw.ix_lin, iw.iy_lin, iw.kz0,
+                                  iw.wx, iw.wy, iw.wz)
+        return _gather_interp(Ff, iw.ix_lin.long(), iw.iy_lin.long(),
+                              iw.kz0.long(), iw.wx, iw.wy, iw.wz)
 
     def _sample(self, comp, x, y, z):
         """Sample the trajectory (mid) velocity component `comp` at arbitrary
-        points (order = self.traj_order). Inputs share one broadcast shape."""
+        points (order = self.traj_order). Inputs share one broadcast shape.
+        Calls the RAW helpers so it inlines cleanly when the whole departure
+        computation is traced by torch.compile."""
         shape = x.shape
-        iw = self._build_iw(self.spec[comp], x.reshape(-1), y.reshape(-1),
-                            torch.clamp(z, self.z_lo, self.z_hi).reshape(-1),
-                            self.traj_order)
-        return self._apply_iw(self.mbuf[comp], iw).reshape(shape)
+        ix_lin, iy_lin, kz0, wx, wy, wz, _ = self._build_iw_impl(
+            self.spec[comp], x.reshape(-1), y.reshape(-1),
+            torch.clamp(z, self.z_lo, self.z_hi).reshape(-1),
+            self.traj_order, False)
+        return _gather_interp(self.mbuf[comp].reshape(-1),
+                              ix_lin, iy_lin, kz0, wx, wy, wz).reshape(shape)
 
     # ------------------------------------------------------------------
     # Departure points
@@ -366,11 +447,30 @@ class SLAdvector:
         # x_d = x_a - dt*V(x_m) with the same V used for the last midpoint update
         return 2.0 * xm - xa, 2.0 * ym - ya, 2.0 * zm - za
 
-    def compute_departure(self, comp, dt_t):
-        """Departure-point stencil for component `comp`."""
+    def _compute_departure_impl(self, comp, dt_t):
         xd, yd, zd = self.departure_coords(comp, dt_t)
-        return self._build_iw(self.spec[comp], xd.reshape(-1), yd.reshape(-1),
-                              zd.reshape(-1), self.order, count_clamp=True)
+        return self._build_iw_impl(self.spec[comp], xd.reshape(-1), yd.reshape(-1),
+                                   zd.reshape(-1), self.order, True)
+
+    def _advect_comp_impl(self, comp, dt_t, F_flat, extra_flats):
+        """End-to-end advection of one component: departure points, stencil,
+        gather of the field (and of any extra RHS fields with the same
+        stencil). Written as a single pointwise chain for torch.compile."""
+        xd, yd, zd = self.departure_coords(comp, dt_t)
+        x, y, z = xd.reshape(-1), yd.reshape(-1), zd.reshape(-1)
+        ix_lin, iy_lin, kz0, wx, wy, wz, n_clamped = self._build_iw_impl(
+            self.spec[comp], x, y, z, self.order, True)
+        out = _gather_interp(F_flat, ix_lin, iy_lin, kz0, wx, wy, wz)
+        extras = tuple(_gather_interp(E, ix_lin, iy_lin, kz0, wx, wy, wz)
+                       for E in extra_flats)
+        return out, extras, n_clamped
+
+    def compute_departure(self, comp, dt_t):
+        """Departure-point stencil for component `comp` (compiled as ONE fused
+        graph — trajectory iterations + stencil build — on the fast path)."""
+        fn = self._dep_c if self._dep_c is not None else self._compute_departure_impl
+        ix_lin, iy_lin, kz0, wx, wy, wz, n_clamped = fn(comp, dt_t)
+        return IndexWeights(ix_lin, iy_lin, kz0, wx, wy, wz, self.order, n_clamped)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -399,28 +499,60 @@ class SLAdvector:
         fields = {'u': u, 'v': v, 'w': w}
         outs = {'u': self.ustar, 'v': self.vstar, 'w': self.wstar}
         extras = [dict() for _ in extra_rhs] if extra_rhs is not None else None
+        if extra_rhs is not None and len(self._ebuf) < len(extra_rhs):
+            # lazily allocated node buffers for the extra RHS fields
+            while len(self._ebuf) < len(extra_rhs):
+                self._ebuf.append({c: torch.empty_like(self.fbuf[c]) for c in 'uvw'})
 
         n_clamped = torch.zeros((), dtype=torch.int64, device=self.device)
+        if self._triton is not None:
+            self._triton.nclamp.zero_()
+            dt_f = float(dt_t)
         for ic, comp in enumerate('uvw'):
-            iw = self.compute_departure(comp, dt_t)
-            self.last_iw[comp] = iw
-            n_clamped += iw.n_clamped
-
-            self._fill(self.fbuf[comp], comp, fields[comp])
-            vals = self._apply_iw(self.fbuf[comp], iw)
-
             shape = self.arrival[comp][3]
             out = outs[comp]
+            self._fill(self.fbuf[comp], comp, fields[comp])
+            if extras is not None:
+                for t, triple in enumerate(extra_rhs):
+                    self._fill(self._ebuf[t][comp], comp, triple[ic])
+
+            if self._triton is not None:
+                # hand-written Triton kernels (registers-only stencil path).
+                # Extras first (gather() reuses one output buffer per comp, so
+                # they must be cloned before the field gather overwrites it).
+                n = self._triton.departure(comp, dt_f)
+                if extras is not None:
+                    for t in range(len(extra_rhs)):
+                        extras[t][comp] = self._triton.gather(
+                            comp, self._ebuf[t][comp], n).clone().reshape(shape)
+                vals = self._triton.gather(comp, self.fbuf[comp], n)
+            elif self._advect_c is not None:
+                # fused fast path: one compiled graph per component
+                eflats = (tuple(self._ebuf[t][comp].reshape(-1)
+                                for t in range(len(extra_rhs)))
+                          if extra_rhs is not None else ())
+                vals, evals, ncl = self._advect_c(comp, dt_t,
+                                                  self.fbuf[comp].reshape(-1), eflats)
+                n_clamped += ncl
+                if extras is not None:
+                    for t in range(len(extra_rhs)):
+                        extras[t][comp] = evals[t].reshape(shape)
+            else:
+                iw = self.compute_departure(comp, dt_t)
+                self.last_iw[comp] = iw
+                n_clamped += iw.n_clamped
+                vals = self._apply_iw(self.fbuf[comp], iw)
+                if extras is not None:
+                    for t in range(len(extra_rhs)):
+                        extras[t][comp] = self._apply_iw(self._ebuf[t][comp], iw).reshape(shape)
+
             if comp == 'w':
                 out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz] = vals.reshape(shape)
             else:
                 out[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] = vals.reshape(shape)
 
-            if extras is not None:
-                for t, triple in enumerate(extra_rhs):
-                    self._fill(self.fbuf[comp], comp, triple[ic])
-                    extras[t][comp] = self._apply_iw(self.fbuf[comp], iw).reshape(shape)
-
+        if self._triton is not None:
+            n_clamped = self._triton.nclamp[0].long()
         self.n_clamped_last = n_clamped
 
         if extras is not None:

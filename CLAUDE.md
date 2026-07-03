@@ -24,7 +24,9 @@ PYTORCH_JIT=0 python bench/bench_interp.py
 python scripts/compare_stats.py resultsA/turbulence_stats.npz resultsB/turbulence_stats.npz --labels A B
 ```
 
-On the GB10 GPU always run with `PYTORCH_JIT=0` (TorchScript fuser can't NVRTC-compile on sm_121). Opt-in perf layers (same env vars as torChannel): `TORCHANNEL_COMPILE=1` (needs `CC=gcc`) and `TORCHANNEL_POISSON_CUDAGRAPH=1`.
+On the GB10 GPU always run with `CC=gcc PYTORCH_JIT=0` (TorchScript fuser and Triton's launcher build both break otherwise on sm_121). Opt-in perf layers (same env vars as torChannel): `TORCHANNEL_COMPILE=1` and `TORCHANNEL_POISSON_CUDAGRAPH=1`.
+
+**Performance tiers of the SL advection** (measured at 768×768×180 on the GB10): hand-written Triton kernels (`semilag_triton.py`, auto-enabled for `interp_dtype: fp32_accum64` + `traj_interp_order: 2` on CUDA, disable with `SLCHANNEL_TRITON=0`) — 126 ms tricubic / 143 ms quintic for the full 3-component advect; torch.compile fused graphs (`TORCHANNEL_COMPILE=1`) — ~420 ms fp32; eager fp64 reference — ~40 s (do not use on GPU; it's the CPU-test path). Key GB10 facts baked into this design: fp64 flops are 1/64 of fp32 (flop-dense interpolation must be fp32; bandwidth-bound stencils are fine in fp64), and Inductor materializes multi-use (N,order) weight tensors (~10 GB traffic) unless `realize_*_threshold` are raised — the Triton kernels keep everything register-resident instead.
 
 ## Architecture
 
