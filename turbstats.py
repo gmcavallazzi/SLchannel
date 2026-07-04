@@ -172,17 +172,30 @@ class TurbulenceStats:
         v_fft_top = torch.fft.rfft2(v_top)
         w_fft_top = torch.fft.rfft2(-w_top)
 
-        # Compute energy spectra for bottom wall
-        E_uu_bot = torch.abs(u_fft_bot)**2 / (self.nx * self.ny)**2
-        E_vv_bot = torch.abs(v_fft_bot)**2 / (self.nx * self.ny)**2
-        E_ww_bot = torch.abs(w_fft_bot)**2 / (self.nx * self.ny)**2
-        E_uw_bot = (u_fft_bot * torch.conj(w_fft_bot)).real / (self.nx * self.ny)**2
+        # Energy spectra via explicit real/imag arithmetic: complex
+        # elementwise CUDA ops (abs, conj-multiply) are jiterator kernels
+        # compiled with nvrtc at runtime, which fails on the GB10 (sm_121)
+        # regardless of PYTORCH_JIT=0. .real/.imag are views; the math below
+        # runs as plain real-dtype eager kernels. Same formulation as
+        # torChannel's multi-plane spectra.
+        norm = (self.nx * self.ny)**2
 
-        # Compute energy spectra for top wall
-        E_uu_top = torch.abs(u_fft_top)**2 / (self.nx * self.ny)**2
-        E_vv_top = torch.abs(v_fft_top)**2 / (self.nx * self.ny)**2
-        E_ww_top = torch.abs(w_fft_top)**2 / (self.nx * self.ny)**2
-        E_uw_top = (u_fft_top * torch.conj(w_fft_top)).real / (self.nx * self.ny)**2
+        def _auto(F):
+            return (F.real * F.real + F.imag * F.imag) / norm
+
+        def _cross_re(F, G):
+            # (F * conj(G)).real
+            return (F.real * G.real + F.imag * G.imag) / norm
+
+        E_uu_bot = _auto(u_fft_bot)
+        E_vv_bot = _auto(v_fft_bot)
+        E_ww_bot = _auto(w_fft_bot)
+        E_uw_bot = _cross_re(u_fft_bot, w_fft_bot)
+
+        E_uu_top = _auto(u_fft_top)
+        E_vv_top = _auto(v_fft_top)
+        E_ww_top = _auto(w_fft_top)
+        E_uw_top = _cross_re(u_fft_top, w_fft_top)
 
         # Average the spectra (no flips needed for auto-spectra)
         E_uu_2d = 0.5 * (E_uu_bot + E_uu_top)
