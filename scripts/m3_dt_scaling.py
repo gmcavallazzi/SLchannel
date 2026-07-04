@@ -30,6 +30,9 @@ plt.rcParams.update({'font.size': 11, 'mathtext.fontset': 'stix',
 
 REF = 'results_180cans_ref/turbulence_stats.npz'
 SWEEP = [(0.034, 'results_180cans_sl_fp32/turbulence_stats.npz'),
+         (0.030, 'results_180cans_sl_dt30/turbulence_stats.npz'),
+         (0.0255, 'results_180cans_sl_dt255/turbulence_stats.npz'),
+         (0.021, 'results_180cans_sl_dt21/turbulence_stats.npz'),
          (0.017, 'results_180cans_sl_dt17/turbulence_stats.npz'),
          (0.0085, 'results_180cans_sl_dt85/turbulence_stats.npz'),
          (0.00425, 'results_180cans_sl_dt425/turbulence_stats.npz')]
@@ -38,7 +41,7 @@ ref = np.load(REF)
 tail = {k: ref[k].sum(axis=1)[-10:].mean() for k in ('E_uu_2d', 'E_vv_2d', 'E_ww_2d')}
 
 dts, ratios = [], {k: [] for k in tail}
-print("=== floor/Eulerian tail vs dt_max (cubic fp32, z+~15) ===")
+print("=== tail and mid-k (kx idx 30) vs Eulerian, per dt_max (cubic fp32, z+~15) ===")
 for dt, path in SWEEP:
     if not os.path.exists(path):
         print(f"[skip] dt_max={dt}: {path} not found")
@@ -49,7 +52,9 @@ for dt, path in SWEEP:
     for k in tail:
         r = d[k].sum(axis=1)[-10:].mean() / tail[k]
         ratios[k].append(r)
-        line += f"  {k.split('_')[1]} {r:6.1f}x"
+        line += f"  {k.split('_')[1]} {r:9.2e}"
+    mids = [d[k].sum(axis=1)[30] / ref[k].sum(axis=1)[30] for k in tail]
+    line += f"  | mid-k {mids[0]:5.2f}/{mids[1]:5.2f}/{mids[2]:5.2f}"
     line += f"  | u_tau {float(d['u_tau']):.5f}"
     print(line)
 

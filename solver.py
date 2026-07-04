@@ -162,8 +162,16 @@ class SLChannelFlow:
         self.sl_time_scheme = sl_cfg.get('time_scheme', 'v1')
         self.sl_interp_dtype = sl_cfg.get('interp_dtype', 'fp64')
         self.sl_field_interp = sl_cfg.get('field_interp', 'lagrange')
+        # Trajectory-velocity extrapolation: 'ab2' (V^{n+1/2} = 1.5 V^n -
+        # 0.5 V^{n-1}, the accurate default) or 'none' (V^n — trajectories
+        # degrade to O(dt), DIAGNOSTIC ONLY: isolates AB2-extrapolation noise
+        # as a floor-injection suspect; extrapolating modes that decorrelate
+        # within one step amplifies their variance ~2.5x per step).
+        self.sl_traj_extrap = sl_cfg.get('traj_extrapolation', 'ab2')
         if self.sl_time_scheme not in ['v1', 'v2']:
             raise ValueError(f"sl.time_scheme must be 'v1' or 'v2', got {self.sl_time_scheme}")
+        if self.sl_traj_extrap not in ['ab2', 'none']:
+            raise ValueError(f"sl.traj_extrapolation must be 'ab2' or 'none', got {self.sl_traj_extrap}")
 
         # Output settings
         output_config = config.get('output', {})
@@ -445,7 +453,10 @@ class SLChannelFlow:
         dt_t = torch.as_tensor(dt, device=self.device, dtype=torch.float64)
 
         # ---- trajectory velocity at t^{n+1/2} (AB2 extrapolation) ----
-        if self.u_nm1 is None:
+        if self.sl_traj_extrap == 'none':
+            # diagnostic mode: no extrapolation (O(dt) trajectories)
+            u_mid, v_mid, w_mid = self.u, self.v, self.w
+        elif self.u_nm1 is None:
             # bootstrap (first step / after restart): V^{n+1/2} ~ V^n
             self.u_nm1 = self.u.clone()
             self.v_nm1 = self.v.clone()
