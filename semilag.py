@@ -109,6 +109,41 @@ def _z_denominator_table(znodes: torch.Tensor, order: int) -> torch.Tensor:
     return (1.0 / diff.prod(dim=2)).to(device)
 
 
+def _bspline_weights(t: torch.Tensor) -> torch.Tensor:
+    """Uniform cubic B-spline weights for offsets {-1, 0, 1, 2}; t in [0,1).
+    Applied to PREFILTERED coefficients this is an interpolating C^2 kernel."""
+    omt = 1.0 - t
+    t2 = t * t
+    t3 = t2 * t
+    return torch.stack([omt * omt * omt / 6.0,
+                        (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0,
+                        (1.0 + 3.0 * (t + t2 - t3)) / 6.0,
+                        t3 / 6.0], dim=-1)
+
+
+def _lagrange_cubic_deriv_weights(zn4: torch.Tensor, t) -> torch.Tensor:
+    """Weights w_i such that sum_i w_i f(z_i) is the derivative at z=t of the
+    cubic through the 4 nodes zn4. Used as spline end conditions (exact for
+    cubic data, so the spline reproduces cubics globally)."""
+    zn = zn4.to(torch.float64).cpu()
+    t = float(t)
+    w = []
+    for i in range(4):
+        others = [l for l in range(4) if l != i]
+        denom = 1.0
+        for l in others:
+            denom *= float(zn[i] - zn[l])
+        s = 0.0
+        for l in others:
+            p = 1.0
+            for m in others:
+                if m != l:
+                    p *= (t - float(zn[m]))
+            s += p
+        w.append(s / denom)
+    return torch.tensor(w, dtype=torch.float64, device=zn4.device)
+
+
 def _uniform_inv_denominators(order: int) -> list:
     """Inverse denominators for integer-offset nodes off_m = m - (order/2 - 1)."""
     offs = [m - (order // 2 - 1) for m in range(order)]
@@ -128,9 +163,12 @@ class SLAdvector:
     def __init__(self, nx, ny, nz, dx, dy, Lx, Ly, Lz,
                  z_f, z_c, gamma, stretching_type='symmetric',
                  order=4, traj_order=2, n_traj_iters=2, top_wall_bc_type='dirichlet',
-                 interp_dtype='fp64', device=torch.device('cpu')):
+                 interp_dtype='fp64', field_interp='lagrange',
+                 device=torch.device('cpu')):
         if order not in (4, 6):
             raise ValueError(f"sl.interp_order must be 4 (tricubic) or 6 (triquintic), got {order}")
+        if field_interp not in ('lagrange', 'spline'):
+            raise ValueError(f"sl.field_interp must be 'lagrange' or 'spline', got {field_interp}")
         if traj_order not in (2, 4):
             raise ValueError(f"sl.traj_interp_order must be 2 (trilinear) or 4 (tricubic), got {traj_order}")
         if stretching_type not in ('symmetric', 'bottom'):
@@ -155,6 +193,14 @@ class SLAdvector:
         self.n_traj_iters = n_traj_iters
         self.top_wall_bc_type = top_wall_bc_type
         self.interp_dtype = interp_dtype
+        # Field-remap interpolant: 'lagrange' = tensor-product Lagrange
+        # (tricubic/triquintic); 'spline' = C^2 interpolant — prefiltered
+        # cubic B-spline in the periodic uniform x,y directions + nonuniform
+        # C^2 cubic spline in z (Hermite evaluation from node derivatives).
+        # Rationale: Lagrange interpolants of ANY order are only C^0 across
+        # cell faces; the derivative kinks scatter energy into a high-k
+        # spectral floor under repeated remapping (M3 finding, 2026-07-04).
+        self.field_interp = field_interp
         self.device = device
 
         self.z_f = z_f
@@ -199,6 +245,50 @@ class SLAdvector:
         self._udenom = {o: _uniform_inv_denominators(o)
                         for o in {2, traj_order, order}}
 
+        # --- C^2 spline field-remap machinery ---------------------------------
+        # x,y: prefiltered cubic B-spline. The node buffers hold EXACTLY one
+        # period in x and y, so the prefilter (inverse of the [1/6,4/6,1/6]
+        # kernel) is a pointwise division by the B-spline symbol in Fourier
+        # space: b(theta) = (4 + 2 cos theta)/6 in [1/3, 1] — never small.
+        # z: nonuniform C^2 cubic spline through the actual znodes (ghosts
+        # included, so wall behaviour comes from the BC-consistent ghost
+        # values). Node derivatives m solve the standard C^2 tridiagonal
+        # system; end rows clamp m to the derivative of the local Lagrange
+        # cubic (exact for cubics -> global cubic reproduction, no natural-BC
+        # accuracy loss at the walls). Evaluation is Hermite on the bracketing
+        # interval, stored INTERLEAVED (Q[..., 2k] = c_k, Q[..., 2k+1] = m_k)
+        # so the 4-point z gather [c_k, m_k, c_{k+1}, m_{k+1}] is contiguous
+        # and reuses _gather_interp unchanged.
+        if field_interp == 'spline':
+            kx = torch.fft.fftfreq(nx, device=device).to(torch.float64) * (2.0 * torch.pi)
+            ky = torch.fft.rfftfreq(ny, device=device).to(torch.float64) * (2.0 * torch.pi)
+            bx = (4.0 + 2.0 * torch.cos(kx)) / 6.0
+            by = (4.0 + 2.0 * torch.cos(ky)) / 6.0
+            self._bsym = bx.view(-1, 1) * by.view(1, -1)          # (nx, ny//2+1)
+            self._ztri = {}
+            for c in 'uvw':
+                zn = self.spec[c].znodes.to(torch.float64)
+                NZ = self.spec[c].NZ
+                h = zn[1:] - zn[:-1]                               # (NZ-1,)
+                a = torch.zeros(NZ, dtype=torch.float64, device=device)
+                b = torch.ones(NZ, dtype=torch.float64, device=device)
+                cc = torch.zeros(NZ, dtype=torch.float64, device=device)
+                a[1:-1] = 1.0 / h[:-1]
+                b[1:-1] = 2.0 * (1.0 / h[:-1] + 1.0 / h[1:])
+                cc[1:-1] = 1.0 / h[1:]
+                e0 = _lagrange_cubic_deriv_weights(zn[:4], zn[0])
+                e1 = _lagrange_cubic_deriv_weights(zn[-4:], zn[-1])
+                self._ztri[c] = {
+                    'a': a.to(self._buf_dtype), 'b': b.to(self._buf_dtype),
+                    'c': cc.to(self._buf_dtype),
+                    'h': h.to(self._coord_dtype),
+                    'hinv2': (1.0 / h**2).to(self._buf_dtype),
+                    'e0': e0.to(self._buf_dtype), 'e1': e1.to(self._buf_dtype),
+                }
+        else:
+            self._bsym = None
+            self._ztri = None
+
         # --- arrival coordinates (broadcastable, physical) -------------------
         ar = torch.arange(1, nx + 1, dtype=self._coord_dtype, device=device)
         aj = torch.arange(1, ny + 1, dtype=self._coord_dtype, device=device)
@@ -238,17 +328,20 @@ class SLAdvector:
             self._gather_c = torch.compile(_gather_interp, dynamic=False)
             self._dep_c = torch.compile(self._compute_departure_impl, dynamic=False)
             self._advect_c = torch.compile(self._advect_comp_impl, dynamic=False)
+            self._advect_spline_c = torch.compile(self._advect_comp_spline_impl,
+                                                  dynamic=False)
         else:
             self._gather_c = None
             self._dep_c = None
             self._advect_c = None
+            self._advect_spline_c = None
 
         # Hand-written Triton kernels: the fastest path (weights/indices fully
         # register-resident). Used automatically for the fp32 pipeline with
         # trilinear trajectories on CUDA; disable with SLCHANNEL_TRITON=0.
         self._triton = None
         if (device.type == 'cuda' and interp_dtype == 'fp32_accum64'
-                and traj_order == 2
+                and traj_order == 2 and field_interp == 'lagrange'
                 and os.environ.get("SLCHANNEL_TRITON", "1") == "1"):
             try:
                 from semilag_triton import TritonSL
@@ -267,6 +360,16 @@ class SLAdvector:
 
         self.fbuf = {c: alloc(self.spec[c]) for c in 'uvw'}
         self.mbuf = {c: alloc(self.spec[c]) for c in 'uvw'}
+        # spline-coefficient buffers (values and z-derivatives interleaved)
+        if field_interp == 'spline':
+            self.qbuf = {c: torch.empty(self.spec[c].NX, self.spec[c].NY,
+                                        2 * self.spec[c].NZ,
+                                        dtype=self._buf_dtype, device=device)
+                         for c in 'uvw'}
+            self._eqbuf = []
+        else:
+            self.qbuf = None
+            self._eqbuf = None
 
         # Preallocated ghost-shaped outputs
         self.ustar = torch.zeros(nx + 1, ny + 2, nz + 2, dtype=torch.float64, device=device)
@@ -294,6 +397,92 @@ class SLAdvector:
             buf.copy_(field[1:nx + 1, 0:ny, :])
         else:  # w
             buf.copy_(field[1:nx + 1, 1:ny + 1, :])
+
+    # ------------------------------------------------------------------
+    # C^2 spline coefficients (field-remap 'spline' mode)
+    # ------------------------------------------------------------------
+
+    def _spline_coeffs(self, buf, comp, qbuf):
+        """Fill qbuf (NX, NY, 2*NZ interleaved [c_k, m_k]) with the C^2
+        spline representation of the node buffer `buf`:
+        x,y B-spline prefilter (FFT symbol division over the exact period),
+        then the nonuniform z-spline node derivatives (batched tridiagonal,
+        Lagrange-cubic-clamped ends)."""
+        from tridiag import pcr_solve
+        spec = self.spec[comp]
+        tri = self._ztri[comp]
+        NZ = spec.NZ
+
+        F = torch.fft.rfft2(buf, dim=(0, 1))
+        F = F / self._bsym.unsqueeze(-1).to(F.real.dtype)
+        C = torch.fft.irfft2(F, s=(spec.NX, spec.NY), dim=(0, 1)).to(buf.dtype)
+
+        rc = C.reshape(-1, NZ)
+        rhs = torch.empty_like(rc)
+        dC = rc[:, 1:] - rc[:, :-1]                       # (B, NZ-1)
+        hinv2 = tri['hinv2']
+        rhs[:, 1:-1] = 3.0 * (dC[:, :-1] * hinv2[:-1] + dC[:, 1:] * hinv2[1:])
+        rhs[:, 0] = rc[:, :4] @ tri['e0']
+        rhs[:, -1] = rc[:, -4:] @ tri['e1']
+        m = pcr_solve(tri['a'], tri['b'], tri['c'], rhs)
+
+        q = qbuf.view(spec.NX, spec.NY, NZ, 2)
+        q[..., 0] = C
+        q[..., 1] = m.reshape(spec.NX, spec.NY, NZ)
+        return qbuf
+
+    def _build_iw_spline_impl(self, spec, x, y, z, count_clamp):
+        """Stencil for the C^2 spline gather: B-spline weights in x,y over the
+        usual {-1,0,1,2} offsets, Hermite weights in z over the interleaved
+        [c_k, m_k, c_{k+1}, m_{k+1}] quadruple at flat base 2*k."""
+        if count_clamp:
+            n_clamped = ((z < self.z_lo) | (z > self.z_hi)).sum()
+            z = torch.clamp(z, self.z_lo, self.z_hi)
+        else:
+            n_clamped = torch.zeros((), dtype=torch.int64, device=z.device)
+
+        offs = torch.arange(4, device=x.device) - 1
+        NZ2 = 2 * spec.NZ
+
+        sx = x / self.dx + spec.shift_x
+        ix0 = sx.floor()
+        tx = sx - ix0
+        ix = torch.remainder(ix0.long().unsqueeze(1) + offs, spec.NX)
+        ix_lin = (ix * (spec.NY * NZ2)).to(self._idx_dtype)
+        wx = _bspline_weights(tx).to(self._buf_dtype)
+
+        sy = y / self.dy + spec.shift_y
+        iy0 = sy.floor()
+        ty = sy - iy0
+        iy = torch.remainder(iy0.long().unsqueeze(1) + offs, spec.NY)
+        iy_lin = (iy * NZ2).to(self._idx_dtype)
+        wy = _bspline_weights(ty).to(self._buf_dtype)
+
+        tri = self._ztri[spec.name]
+        m0 = torch.clamp(self._locate_z(z, spec), 0, spec.NZ - 2)
+        h = tri['h'][m0]
+        s = (z - spec.znodes[m0]) / h
+        s2 = s * s
+        s3 = s2 * s
+        wz = torch.stack([2.0 * s3 - 3.0 * s2 + 1.0,      # h00 -> c_k
+                          (s3 - 2.0 * s2 + s) * h,        # h10 -> m_k
+                          -2.0 * s3 + 3.0 * s2,           # h01 -> c_{k+1}
+                          (s3 - s2) * h], dim=-1).to(self._buf_dtype)
+
+        return ix_lin, iy_lin, (2 * m0).to(self._idx_dtype), wx, wy, wz, n_clamped
+
+    def _advect_comp_spline_impl(self, comp, dt_t, Q_flat, extra_qflats):
+        """Spline-mode counterpart of _advect_comp_impl (departure points +
+        spline stencil + gathers as one compilable chain; the FFT/tridiagonal
+        coefficient build stays outside)."""
+        xd, yd, zd = self.departure_coords(comp, dt_t)
+        x, y, z = xd.reshape(-1), yd.reshape(-1), zd.reshape(-1)
+        ix_lin, iy_lin, kz0, wx, wy, wz, n_clamped = self._build_iw_spline_impl(
+            self.spec[comp], x, y, z, True)
+        out = _gather_interp(Q_flat, ix_lin, iy_lin, kz0, wx, wy, wz)
+        extras = tuple(_gather_interp(E, ix_lin, iy_lin, kz0, wx, wy, wz)
+                       for E in extra_qflats)
+        return out, extras, n_clamped
 
     # ------------------------------------------------------------------
     # z location via the analytic inverse tanh map
@@ -516,7 +705,30 @@ class SLAdvector:
                 for t, triple in enumerate(extra_rhs):
                     self._fill(self._ebuf[t][comp], comp, triple[ic])
 
-            if self._triton is not None:
+            if self.field_interp == 'spline':
+                # C^2 spline remap: coefficient build (FFT prefilter + batched
+                # tridiagonal) outside the compiled graph, then the fused
+                # departure/stencil/gather chain on the interleaved buffer.
+                self._spline_coeffs(self.fbuf[comp], comp, self.qbuf[comp])
+                if extras is not None:
+                    while len(self._eqbuf) < len(extra_rhs):
+                        self._eqbuf.append({c: torch.empty_like(self.qbuf[c])
+                                            for c in 'uvw'})
+                    for t in range(len(extra_rhs)):
+                        self._spline_coeffs(self._ebuf[t][comp], comp,
+                                            self._eqbuf[t][comp])
+                fn = (self._advect_spline_c if self._advect_spline_c is not None
+                      else self._advect_comp_spline_impl)
+                eqflats = (tuple(self._eqbuf[t][comp].reshape(-1)
+                                 for t in range(len(extra_rhs)))
+                           if extra_rhs is not None else ())
+                vals, evals, ncl = fn(comp, dt_t,
+                                      self.qbuf[comp].reshape(-1), eqflats)
+                n_clamped += ncl
+                if extras is not None:
+                    for t in range(len(extra_rhs)):
+                        extras[t][comp] = evals[t].reshape(shape)
+            elif self._triton is not None:
                 # hand-written Triton kernels (registers-only stencil path).
                 # Extras first (gather() reuses one output buffer per comp, so
                 # they must be cloned before the field gather overwrites it).

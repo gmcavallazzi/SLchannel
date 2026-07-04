@@ -161,6 +161,7 @@ class SLChannelFlow:
         self.sl_traj_iters = sl_cfg.get('n_traj_iters', 2)
         self.sl_time_scheme = sl_cfg.get('time_scheme', 'v1')
         self.sl_interp_dtype = sl_cfg.get('interp_dtype', 'fp64')
+        self.sl_field_interp = sl_cfg.get('field_interp', 'lagrange')
         if self.sl_time_scheme not in ['v1', 'v2']:
             raise ValueError(f"sl.time_scheme must be 'v1' or 'v2', got {self.sl_time_scheme}")
 
@@ -274,11 +275,13 @@ class SLChannelFlow:
                                  order=self.sl_order, traj_order=self.sl_traj_order,
                                  n_traj_iters=self.sl_traj_iters,
                                  top_wall_bc_type=self.top_wall_bc_type,
-                                 interp_dtype=self.sl_interp_dtype, device=self.device)
+                                 interp_dtype=self.sl_interp_dtype,
+                                 field_interp=self.sl_field_interp, device=self.device)
             print(f"Semi-Lagrangian advection: order={self.sl_order}, "
                   f"traj_order={self.sl_traj_order}, "
                   f"n_traj_iters={self.sl_traj_iters}, scheme={self.sl_time_scheme}, "
-                  f"interp_dtype={self.sl_interp_dtype}", flush=True)
+                  f"interp_dtype={self.sl_interp_dtype}, "
+                  f"field_interp={self.sl_field_interp}", flush=True)
         # AB2-extrapolation history (V^{n-1}) and midpoint buffers, lazily
         # allocated on the first SL step (restart re-bootstraps: V_mid = V^n)
         self.u_nm1 = None
