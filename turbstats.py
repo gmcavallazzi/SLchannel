@@ -18,7 +18,8 @@ class TurbulenceStats:
     """
 
     def __init__(self, nx, ny, nz, Lx, Ly, Lz, z_c, z_f, dz_c, dz_f,
-                 dx, dy, nu, Re_tau_target, z_plus_target=15.0, device='cpu'):
+                 dx, dy, nu, Re_tau_target, z_plus_target=15.0, device='cpu',
+                 top_wall_bc_type='dirichlet'):
         """
         Initialize statistics accumulator.
 
@@ -47,6 +48,7 @@ class TurbulenceStats:
         self.dy = dy
         self.nu = nu
         self.device = device
+        self.top_wall_bc_type = top_wall_bc_type
 
         # Compute target u_tau and find z+ grid indices
         delta = Lz / 2.0  # Half-channel height
@@ -271,10 +273,15 @@ class TurbulenceStats:
         # Distance from wall to first interior cell center
         dz_utau = float(self.z_c[1])  # z_c[1] is first interior point (z_c[0] is ghost)
 
-        # Velocity gradient: average of first points from both walls divided by distance
-        # U_mean_gpu[0]: first interior point from bottom wall
-        # U_mean_gpu[-1]: first interior point from top wall
-        dUdz_wall = float(0.5 * (U_mean_gpu[0] + U_mean_gpu[-1]) / dz_utau)
+        # Velocity gradient at the wall(s). With a free-slip top (open
+        # channel) only the bottom wall carries shear: U_mean[-1] is the
+        # near-surface velocity, not a wall gradient sample, and averaging
+        # it in inflates u_tau by ~sqrt(U_centerline/(2*dz)) — use the
+        # bottom wall alone in that case.
+        if self.top_wall_bc_type == 'neumann':
+            dUdz_wall = float(U_mean_gpu[0] / dz_utau)
+        else:
+            dUdz_wall = float(0.5 * (U_mean_gpu[0] + U_mean_gpu[-1]) / dz_utau)
 
         # Compute u_tau from wall shear stress: tau_wall = nu * dU/dz|_wall = u_tau^2
         u_tau_computed = float(np.sqrt(self.nu * dUdz_wall))

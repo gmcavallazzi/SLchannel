@@ -332,7 +332,8 @@ class SLChannelFlow:
                 self.nx, self.ny, self.nz, self.Lx, self.Ly, self.Lz,
                 self.z_c, self.z_f, self.dz_c, self.dz_f,
                 self.dx, self.dy, self.nu,
-                self.Re_tau, z_plus_target=z_plus_target, device=self.device)
+                self.Re_tau, z_plus_target=z_plus_target, device=self.device,
+                top_wall_bc_type=self.top_wall_bc_type)
             if stats_restart_file is not None:
                 print(f"  Loading statistics state from: {stats_restart_file}", flush=True)
                 self.turbulence_stats.load_state(stats_restart_file)
