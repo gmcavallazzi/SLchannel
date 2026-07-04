@@ -17,6 +17,9 @@ python main.py configs/config180_sl.yaml
 # Full test suite (standalone scripts, no pytest; each prints [PASS]/[FAIL])
 for t in tests/test_*.py; do python "$t"; done
 
+# Same suite through the C^2 spline remap (default: lagrange)
+for t in tests/test_*.py; do SL_FIELD_INTERP=spline python "$t"; done
+
 # GPU interpolation microbenchmark (M0)
 PYTORCH_JIT=0 python bench/bench_interp.py
 
@@ -37,7 +40,7 @@ On the GB10 GPU always run with `CC=gcc PYTORCH_JIT=0` (TorchScript fuser and Tr
 - z stencil located by the **analytic inverse tanh map** + one node compare (no searchsorted). Periodic x,y via modulo; one-sided stencils at walls; departure z clamped (counted in `n_clamped_last`, printed as the `clamped` diagnostic column).
 - `IndexWeights` (flat gather indices + weights) is reusable across fields on the same component grid — v2 interpolates the RHS with the same stencils via `advect(..., extra_rhs=[...])`.
 - `traj_order=2` (trilinear) trajectory sampling is the fast default but its C⁰ interpolant caps overall convergence at O(dt) with a small h² coefficient; `traj_order=4` restores clean O(dt²) (verified: self-convergence ratio 3.93).
-- `sl.field_interp: "spline"` — C² field remap replacing the Lagrange gather: prefiltered cubic B-spline in x,y (FFT symbol division over the buffer's exact period) + nonuniform C² cubic spline in z (batched tridiagonal for node derivatives, Lagrange-cubic-clamped ends → cubic-exact, no natural-BC wall loss; Hermite evaluation). Coefficients stored interleaved (`qbuf[..., 2k]=c_k, 2k+1=m_k`) so the 4-point z gather is contiguous and reuses `_gather_interp` unchanged. Motivation: Lagrange interpolants of any order are C⁰ across faces; under repeated remap the kinks scatter energy into a high-k spectral floor ~25× the Eulerian tail (M3 finding, precision-independent). No Triton path yet (compiled/eager only).
+- `sl.field_interp: "spline"` — C² field remap replacing the Lagrange gather: prefiltered cubic B-spline in x,y (FFT symbol multiply over the buffer's exact period) + nonuniform C² cubic spline in z (Lagrange-cubic-clamped ends → cubic-exact, no natural-BC wall loss; Hermite evaluation). The z node derivatives come from a precomputed dense operator D = M⁻¹R applied as ONE batched matmul (~20x a per-step tridiagonal solve at 256²×102). Coefficients stored interleaved (`qbuf[..., 2k]=c_k, 2k+1=m_k`) so the 4-point z gather is contiguous and reuses `_gather_interp` unchanged. Triton fast path: `_spline_gather_kernel` (B-spline x,y + Hermite z, registers-only; same auto-enable rules as the Lagrange kernels) — spline advect 35 ms vs Lagrange 12 ms at 256²×100 (rest = the FFT-prefilter/matmul coefficient builds, 6/step under v2). NOTE (M3 verdict 2026-07-04): the C² remap does NOT remove the SL high-k spectral floor — it raises it (as do quintic and traj_order=4); interpolation error is the floor's dissipation, not its injection. The floor mechanism investigation lives in `scripts/m3_interp_scaling.py` and `scripts/m3_dt_scaling.py`.
 
 **`solver.py` — `SLChannelFlow`.** `advection.scheme: "sl"` selects `step_sl`; `"eulerian"` selects the torChannel-identical IMEX reference (`step_imex`) for like-for-like comparisons. SL step: BCs → AB2 mid-velocity → SL advection → explicit xy-diffusion + forcing → CN implicit z-diffusion (PCR) → FFT projection → bulk-forcing relaxation controller.
 - `sl.time_scheme: "v1"` — simple/robust, globally O(dt) (like the parent code's splitting).

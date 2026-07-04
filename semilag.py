@@ -265,6 +265,7 @@ class SLAdvector:
             bx = (4.0 + 2.0 * torch.cos(kx)) / 6.0
             by = (4.0 + 2.0 * torch.cos(ky)) / 6.0
             self._bsym = bx.view(-1, 1) * by.view(1, -1)          # (nx, ny//2+1)
+            self._bsym_inv = (1.0 / self._bsym).to(self._buf_dtype)
             self._ztri = {}
             for c in 'uvw':
                 zn = self.spec[c].znodes.to(torch.float64)
@@ -278,12 +279,25 @@ class SLAdvector:
                 cc[1:-1] = 1.0 / h[1:]
                 e0 = _lagrange_cubic_deriv_weights(zn[:4], zn[0])
                 e1 = _lagrange_cubic_deriv_weights(zn[-4:], zn[-1])
+                # The node-derivative solve is linear: m = M^{-1} R C with M
+                # the C^2 tridiagonal (end rows identity against e0/e1) and R
+                # the RHS operator. NZ ~ O(100), so applying the precomputed
+                # DENSE D = M^{-1} R as one batched matmul beats a per-step
+                # tridiagonal solve by ~20x (measured 13.9 ms pcr_solve vs
+                # 0.74 ms matmul at 256x256x102 on the GB10). Built in fp64.
+                hinv2 = 1.0 / h**2
+                M = torch.diag(b) + torch.diag(a[1:], -1) + torch.diag(cc[:-1], 1)
+                R = torch.zeros(NZ, NZ, dtype=torch.float64, device=device)
+                ar = torch.arange(1, NZ - 1, device=device)
+                R[ar, ar - 1] = -3.0 * hinv2[:-1]
+                R[ar, ar] = 3.0 * (hinv2[:-1] - hinv2[1:])
+                R[ar, ar + 1] = 3.0 * hinv2[1:]
+                R[0, :4] = e0
+                R[-1, -4:] = e1
+                D = torch.linalg.solve(M, R)
                 self._ztri[c] = {
-                    'a': a.to(self._buf_dtype), 'b': b.to(self._buf_dtype),
-                    'c': cc.to(self._buf_dtype),
                     'h': h.to(self._coord_dtype),
-                    'hinv2': (1.0 / h**2).to(self._buf_dtype),
-                    'e0': e0.to(self._buf_dtype), 'e1': e1.to(self._buf_dtype),
+                    'DT': D.t().contiguous().to(self._buf_dtype),
                 }
         else:
             self._bsym = None
@@ -341,7 +355,7 @@ class SLAdvector:
         # trilinear trajectories on CUDA; disable with SLCHANNEL_TRITON=0.
         self._triton = None
         if (device.type == 'cuda' and interp_dtype == 'fp32_accum64'
-                and traj_order == 2 and field_interp == 'lagrange'
+                and traj_order == 2
                 and os.environ.get("SLCHANNEL_TRITON", "1") == "1"):
             try:
                 from semilag_triton import TritonSL
@@ -405,26 +419,17 @@ class SLAdvector:
     def _spline_coeffs(self, buf, comp, qbuf):
         """Fill qbuf (NX, NY, 2*NZ interleaved [c_k, m_k]) with the C^2
         spline representation of the node buffer `buf`:
-        x,y B-spline prefilter (FFT symbol division over the exact period),
-        then the nonuniform z-spline node derivatives (batched tridiagonal,
-        Lagrange-cubic-clamped ends)."""
-        from tridiag import pcr_solve
+        x,y B-spline prefilter (FFT symbol multiply over the exact period),
+        then the z-spline node derivatives via the precomputed dense
+        operator DT (one batched matmul; see the _ztri build)."""
         spec = self.spec[comp]
-        tri = self._ztri[comp]
         NZ = spec.NZ
 
         F = torch.fft.rfft2(buf, dim=(0, 1))
-        F = F / self._bsym.unsqueeze(-1).to(F.real.dtype)
+        F = F * self._bsym_inv.unsqueeze(-1)
         C = torch.fft.irfft2(F, s=(spec.NX, spec.NY), dim=(0, 1)).to(buf.dtype)
 
-        rc = C.reshape(-1, NZ)
-        rhs = torch.empty_like(rc)
-        dC = rc[:, 1:] - rc[:, :-1]                       # (B, NZ-1)
-        hinv2 = tri['hinv2']
-        rhs[:, 1:-1] = 3.0 * (dC[:, :-1] * hinv2[:-1] + dC[:, 1:] * hinv2[1:])
-        rhs[:, 0] = rc[:, :4] @ tri['e0']
-        rhs[:, -1] = rc[:, -4:] @ tri['e1']
-        m = pcr_solve(tri['a'], tri['b'], tri['c'], rhs)
+        m = C.reshape(-1, NZ) @ self._ztri[comp]['DT']
 
         q = qbuf.view(spec.NX, spec.NY, NZ, 2)
         q[..., 0] = C
@@ -717,17 +722,28 @@ class SLAdvector:
                     for t in range(len(extra_rhs)):
                         self._spline_coeffs(self._ebuf[t][comp], comp,
                                             self._eqbuf[t][comp])
-                fn = (self._advect_spline_c if self._advect_spline_c is not None
-                      else self._advect_comp_spline_impl)
-                eqflats = (tuple(self._eqbuf[t][comp].reshape(-1)
-                                 for t in range(len(extra_rhs)))
-                           if extra_rhs is not None else ())
-                vals, evals, ncl = fn(comp, dt_t,
-                                      self.qbuf[comp].reshape(-1), eqflats)
-                n_clamped += ncl
-                if extras is not None:
-                    for t in range(len(extra_rhs)):
-                        extras[t][comp] = evals[t].reshape(shape)
+                if self._triton is not None:
+                    # registers-only Hermite/B-spline gather; same departure
+                    # kernel as the Lagrange path. Extras first (gather_spline
+                    # reuses one output buffer per comp).
+                    n = self._triton.departure(comp, dt_f)
+                    if extras is not None:
+                        for t in range(len(extra_rhs)):
+                            extras[t][comp] = self._triton.gather_spline(
+                                comp, self._eqbuf[t][comp], n).clone().reshape(shape)
+                    vals = self._triton.gather_spline(comp, self.qbuf[comp], n)
+                else:
+                    fn = (self._advect_spline_c if self._advect_spline_c is not None
+                          else self._advect_comp_spline_impl)
+                    eqflats = (tuple(self._eqbuf[t][comp].reshape(-1)
+                                     for t in range(len(extra_rhs)))
+                               if extra_rhs is not None else ())
+                    vals, evals, ncl = fn(comp, dt_t,
+                                          self.qbuf[comp].reshape(-1), eqflats)
+                    n_clamped += ncl
+                    if extras is not None:
+                        for t in range(len(extra_rhs)):
+                            extras[t][comp] = evals[t].reshape(shape)
             elif self._triton is not None:
                 # hand-written Triton kernels (registers-only stencil path).
                 # Extras first (gather() reuses one output buffer per comp, so
