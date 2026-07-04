@@ -11,11 +11,12 @@ interpolation) across the implementation tiers:
 
 Run:  TORCHANNEL_COMPILE=1 CC=gcc PYTORCH_JIT=0 python bench/bench_interp.py [nx ny nz]
 
-Context (GB10, 768x768x180): torChannel's whole Eulerian IMEX step runs at
-~49 ms at CFL 0.28. Measured here: triton tricubic advect ~126 ms, quintic
-~143 ms. Break-even per simulated time unit ~ (49 + T_SL) / (dt_SL/dt_E) vs
-49; at trajectory CFL 3 the dt ratio is ~10 (Re180 setup) or ~2.6 (Re550,
-where the dt+ <= 0.4 cap binds first).
+Context (GB10, 768x768x180): triton tricubic advect ~126 ms, quintic
+~143 ms. NOTE: torChannel's "~49 ms/step" (commit a10e8e8) was measured at
+128^3 Re180 — NOT at this grid. The honest end-to-end numbers at this size
+live in bench/bench_step.py (2026-07-04: Eulerian IMEX step ~1.29 s with
+the Triton RHS, SL v1 ~1.69 s, SL v2 ~3.53 s; at the Re550 operating dts
+0.005 vs 0.013 SL v1 is ~2.0x faster per simulated time unit).
 """
 
 import sys, os, math, time

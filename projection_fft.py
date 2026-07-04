@@ -81,6 +81,17 @@ def initialize_fft_solver(nx, ny, nz, dx, dy, dz_c, dz_f, top_wall_bc_type='diri
     # at the boundary cell because the boundary velocity is fixed.
     tri_b[:, :, -1] += coeff_right[-1]
 
+    # The (kx=0, ky=0) mode is singular with Neumann pressure BCs at both
+    # walls (pressure is defined only up to a constant): its last Thomas
+    # pivot is pure roundoff and on some grids lands on exactly zero, giving
+    # Inf/NaN that the inverse FFT spreads over the whole field. Pin the
+    # mode by replacing its first row with the identity (tri_a[0,0,0] is
+    # already 0). The remaining rows form a nonsingular chain, and RHS
+    # compatibility (zero-mean divergence) makes the dropped equation
+    # redundant up to rounding.
+    tri_b[0, 0, 0] = 1.0
+    tri_c[0, 0, 0] = 0.0
+
     # Pre-allocate workspace for pressure field (GPU optimization)
     # Reusing this workspace avoids repeated allocations every timestep
     workspace_p = torch.zeros(nx+2, ny+2, nz+2, device=device)

@@ -300,6 +300,22 @@ class SLChannelFlow:
         self._Rxy_v_nm1 = None
         self._Rxy_w_nm1 = None
 
+        # Triton fast path for the Eulerian explicit RHS (fair-comparison
+        # baseline: same hand-written-kernel treatment as the SL advector).
+        # Disable with SLCHANNEL_TRITON=0.
+        self._triton_eul = None
+        if (self.advection_scheme == 'eulerian' and self.device.type == 'cuda'
+                and os.environ.get("SLCHANNEL_TRITON", "1") == "1"):
+            try:
+                from eulerian_triton import TritonEulerianRHS
+                self._triton_eul = TritonEulerianRHS(
+                    self.nx, self.ny, self.nz, self.dx, self.dy,
+                    self.dz_c, self.dz_f, self.nu, self.device)
+                print("Eulerian explicit RHS: Triton fast path enabled", flush=True)
+            except Exception as e:
+                print(f"[eulerian] Triton fast path unavailable ({e}); "
+                      f"using fused eager kernel", flush=True)
+
         # Statistics
         stats_config = config.get('statistics', {})
         self.n_stats = stats_config.get('n_stats', 0)
@@ -595,6 +611,8 @@ class SLChannelFlow:
     # ------------------------------------------------------------------
 
     def compute_momentum_rhs_explicit_imex(self):
+        if self._triton_eul is not None:
+            return self._triton_eul(self.u, self.v, self.w)
         if self.device.type == 'cuda' and hasattr(operators, 'compute_momentum_rhs_fused_imex'):
             return operators.compute_momentum_rhs_fused_imex(
                 self.u, self.v, self.w, self.nx, self.ny, self.nz,

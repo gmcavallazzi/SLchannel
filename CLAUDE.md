@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 slChannel is a research DNS solver for incompressible turbulent channel flow that replaces the CFL-limited explicit advection of its parent code (torChannel, at `/home/giorgio/torChannel`) with **unconditionally stable high-order semi-Lagrangian advection**. dt is then limited only by physical accuracy (trajectory CFL 2–5, dt⁺ ≲ 0.4) instead of CFL ≈ 0.28, targeting a net wall-clock win per simulated time unit on a single GPU. The open research question: do near-wall turbulence statistics survive the SL interpolation dissipation?
 
-Python/PyTorch, `torch.float64` throughout. Infrastructure modules (`operators.py`, `projection_fft.py`, `projection.py`, `tridiag.py`, `utils.py`, `initflow.py`, `turbstats.py`) are verbatim copies from torChannel @ a10e8e8 — keep them in sync conceptually; the new physics lives in `semilag.py` and `solver.py`.
+Python/PyTorch, `torch.float64` throughout. Infrastructure modules (`operators.py`, `projection_fft.py`, `projection.py`, `tridiag.py`, `utils.py`, `initflow.py`, `turbstats.py`) are copies from torChannel @ a10e8e8 — keep them in sync conceptually; the new physics lives in `semilag.py` and `solver.py`. Local divergences from torChannel: `projection_fft.py` pins the singular (kx=0, ky=0) Neumann–Neumann pressure mode (torChannel still has the latent NaN — port when convenient), and `eulerian_triton.py` adds a Triton kernel for the Eulerian explicit RHS (fair-comparison baseline; auto-enabled on CUDA for `advection.scheme: eulerian`, disable with `SLCHANNEL_TRITON=0`).
 
 ## Commands
 
@@ -27,6 +27,8 @@ python scripts/compare_stats.py resultsA/turbulence_stats.npz resultsB/turbulenc
 On the GB10 GPU always run with `CC=gcc PYTORCH_JIT=0` (TorchScript fuser and Triton's launcher build both break otherwise on sm_121). Opt-in perf layers (same env vars as torChannel): `TORCHANNEL_COMPILE=1` and `TORCHANNEL_POISSON_CUDAGRAPH=1`.
 
 **Performance tiers of the SL advection** (measured at 768×768×180 on the GB10): hand-written Triton kernels (`semilag_triton.py`, auto-enabled for `interp_dtype: fp32_accum64` + `traj_interp_order: 2` on CUDA, disable with `SLCHANNEL_TRITON=0`) — 126 ms tricubic / 143 ms quintic for the full 3-component advect; torch.compile fused graphs (`TORCHANNEL_COMPILE=1`) — ~420 ms fp32; eager fp64 reference — ~40 s (do not use on GPU; it's the CPU-test path). Key GB10 facts baked into this design: fp64 flops are 1/64 of fp32 (flop-dense interpolation must be fp32; bandwidth-bound stencils are fine in fp64), and Inductor materializes multi-use (N,order) weight tensors (~10 GB traffic) unless `realize_*_threshold` are raised — the Triton kernels keep everything register-resident instead.
+
+**End-to-end step cost** (768×768×180, GB10, `bench/bench_step.py`, 2026-07-04): Eulerian IMEX 1.29 s/step (Triton RHS 57 ms; eager fused RHS is 132 ms), SL v1 1.69 s/step, SL v2 3.53 s/step. Per simulated time unit at the Re550 operating dts (0.005 Eulerian / 0.013 SL): SL v1 ≈ 2.0× faster, SL v2 ≈ 0.95× (not yet a win). Both schemes are dominated by shared fp64 infrastructure: FFT-Poisson 408 ms (CUDA-graphed serial Thomas — PCR would cut it), implicit z-diffusion 3×190 ms, projection 101 ms. The v2 gap over v1 is ~0.9 s of eager `diffusion_* - diffusion_xy_*` z-RHS stencils plus ~0.25 s extra Triton gathers and ~0.1 s pressure-gradient work — a fused z-Laplacian kernel is the next target.
 
 ## Architecture
 
