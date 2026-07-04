@@ -9,7 +9,7 @@ import math
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import make_field, report
+from _slhelpers import make_field, report, sl_field_interp
 
 torch.set_default_dtype(torch.float64)
 
@@ -23,7 +23,7 @@ def make_adv(n_traj_iters=2):
     dx, dy = Lx / NX, Ly / NY
     z_f, z_c, _, _ = generate_grid(GAMMA, NZ, Lz, stretching_type='symmetric')
     adv = SLAdvector(NX, NY, NZ, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA,
-                     n_traj_iters=n_traj_iters)
+                     n_traj_iters=n_traj_iters, field_interp=sl_field_interp())
     return adv, z_f, z_c, dx, dy
 
 

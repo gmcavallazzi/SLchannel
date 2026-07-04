@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import report
+from _slhelpers import report, sl_field_interp
 
 torch.set_default_dtype(torch.float64)
 
@@ -32,7 +32,8 @@ def run():
             for nz in [64, 180]:
                 z_f, z_c, dz_f, dz_c = generate_grid(gamma, nz, Lz, stretching_type=stretching)
                 adv = SLAdvector(4, 4, nz, 0.5, 0.5, 2.0, 2.0, Lz, z_f, z_c,
-                                 gamma, stretching_type=stretching)
+                                 gamma, stretching_type=stretching,
+                                 field_interp=sl_field_interp())
 
                 # faces must invert to integer indices
                 kf = adv._face_coord(z_f)

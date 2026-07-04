@@ -1,7 +1,15 @@
 """Full advect() path under uniform translation: the result must equal the
 initial field evaluated at the translated positions. Checks (a) exactness for
 a cubic-in-z field (within interpolation order), (b) grid convergence for a
-smooth 3D field, (c) zero clamped departure points."""
+smooth 3D field, (c) zero clamped departure points.
+
+For (b) the shift scales with the grid (DT ~ 1/n) so every resolution samples
+the SAME fractional cell offset: the pointwise interpolation-error kernel
+varies with that offset (zero at nodes, max mid-cell), and under a fixed
+physical shift the offset change between resolutions modulates the 2-point
+ratio (measured: x8.7 instead of x16 for the spline remap, x12.6 for
+Lagrange). The trajectory is exact for uniform velocity, so DT does not enter
+the error otherwise."""
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -10,7 +18,7 @@ import math
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import make_field, full_positions, report
+from _slhelpers import make_field, full_positions, report, sl_field_interp
 
 torch.set_default_dtype(torch.float64)
 
@@ -20,12 +28,14 @@ U0, V0 = 0.9, -0.4
 DT = 0.08
 
 
-def advect_error(n, fn):
+def advect_error(n, fn, dt=None):
+    dt = DT if dt is None else dt
     nx = ny = n
     nz = n
     dx, dy = Lx / nx, Ly / ny
     z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type='symmetric')
-    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA)
+    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA,
+                     field_interp=sl_field_interp())
 
     fields = {c: make_field(c, fn, nx, ny, nz, dx, dy, z_f, z_c) for c in 'uvw'}
     mids = {c: make_field(c, lambda X, Y, Z: U0 + 0 * X, nx, ny, nz, dx, dy, z_f, z_c)
@@ -37,14 +47,14 @@ def advect_error(n, fn):
     mid_v = make_field('v', lambda X, Y, Z: V0 + 0 * X, nx, ny, nz, dx, dy, z_f, z_c)
     mid_w = torch.zeros(nx + 2, ny + 2, nz + 1)
 
-    dt_t = torch.tensor(DT)
+    dt_t = torch.tensor(dt)
     ustar, vstar, wstar = adv.advect(fields['u'], fields['v'], fields['w'],
                                      mid_u, mid_v, mid_w, dt_t)
 
     errs = []
     for comp, out in (('u', ustar), ('v', vstar), ('w', wstar)):
         xa, ya, za, shape = adv.arrival[comp]
-        exact = fn(xa - DT * U0, ya - DT * V0, za).expand(shape)
+        exact = fn(xa - dt * U0, ya - dt * V0, za).expand(shape)
         if comp == 'u' or comp == 'v':
             got = out[1:nx + 1, 1:ny + 1, 1:nz + 1]
         else:
@@ -65,9 +75,9 @@ def run():
     def f(X, Y, Z):
         return (torch.sin(2 * math.pi * X / Lx) * torch.cos(2 * math.pi * Y / Ly)
                 * torch.sin(1.2 * math.pi * Z / Lz + 0.2))
-    e1, _ = advect_error(24, f)
-    e2, _ = advect_error(48, f)
-    ok &= report("smooth-field convergence O(h^4)", e1 / e2 > 10.0,
+    e1, _ = advect_error(24, f, dt=DT)
+    e2, _ = advect_error(48, f, dt=DT / 2)   # same fractional cell offset
+    ok &= report("smooth-field convergence O(h^4)", e1 / e2 > 12.0,
                  f"errors={e1:.3e},{e2:.3e} ratio={e1 / e2:.1f} (ideal 16)")
     return ok
 

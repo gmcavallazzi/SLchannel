@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import math
 import torch
 from utils import generate_grid
-from semilag import SLAdvector
-from _slhelpers import report
+from semilag import SLAdvector, _gather_interp
+from _slhelpers import report, sl_field_interp
 
 torch.set_default_dtype(torch.float64)
 
@@ -28,7 +28,8 @@ def max_interp_error(n, order):
     nx = ny = nz = n
     dx, dy = Lx / nx, Ly / ny
     z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type='symmetric')
-    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA, order=order)
+    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA, order=order,
+                     field_interp=sl_field_interp())
     spec = adv.spec['u']
 
     # node values on the u grid (x faces, y centers, z centers incl. ghosts)
@@ -44,14 +45,24 @@ def max_interp_error(n, order):
     yq = torch.rand(npts) * Ly
     zq = adv.z_lo + torch.rand(npts) * (adv.z_hi - adv.z_lo)  # includes near-wall
 
-    iw = adv._build_iw(spec, xq, yq, zq, order)
-    vals = adv._apply_iw(buf, iw)
+    if adv.field_interp == 'spline':
+        adv._spline_coeffs(buf, 'u', adv.qbuf['u'])
+        iw = adv._build_iw_spline_impl(spec, xq, yq, zq, False)
+        vals = _gather_interp(adv.qbuf['u'].reshape(-1),
+                              iw[0].long(), iw[1].long(), iw[2].long(),
+                              iw[3], iw[4], iw[5])
+    else:
+        iw = adv._build_iw(spec, xq, yq, zq, order)
+        vals = adv._apply_iw(buf, iw)
     return (vals - f(xq, yq, zq)).abs().max().item()
 
 
 def run():
     ok = True
-    for order, min_ratio in [(4, 10.0), (6, 40.0)]:
+    # spline mode: one C^2 cubic interpolant, O(h^4); order=6 is Lagrange-only
+    ladders = ([(4, 10.0), (6, 40.0)] if sl_field_interp() == 'lagrange'
+               else [(4, 10.0)])
+    for order, min_ratio in ladders:
         errs = [max_interp_error(n, order) for n in (32, 64, 128)]
         r1, r2 = errs[0] / errs[1], errs[1] / errs[2]
         ideal = 2 ** order
