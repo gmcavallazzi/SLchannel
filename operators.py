@@ -130,37 +130,46 @@ def advection_u(u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
     """
     Compute advection term for u-component using conservative flux form
     JIT-compiled for GPU performance
+
+    Evaluated on x-faces i = 1..nx, which is EVERY distinct face. u is stored
+    with shape nx+1 and u[0] is the periodic ghost of u[nx] (apply_bc_all does
+    ``u[0] = u[-1]``), so i = nx is a physical face, not a halo. Computing only
+    1..nx-1 leaves that plane without advection: the operator then fails to
+    telescope and injects a spurious 1/nx of the streamwise momentum budget.
+    Face nx needs a right neighbour, hence the one-column periodic extension
+    ``ue[nx+1] == u[1]``; v and w already carry that ghost at index nx+1.
     """
     adv_u = torch.zeros_like(u)
+    ue = torch.cat([u, u[1:2, :, :]], dim=0)
 
     # d(uu)/dx: u already at x-faces, interpolate to get u at face centers
-    u_interp = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[2:nx+1, 1:ny+1, 1:nz+1])
+    u_interp = 0.5 * (ue[1:nx+1, 1:ny+1, 1:nz+1] + ue[2:nx+2, 1:ny+1, 1:nz+1])
     uu_right = u_interp * u_interp # Fixed: symmetric flux
-    u_interp = 0.5 * (u[0:nx-1, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
+    u_interp = 0.5 * (ue[0:nx, 1:ny+1, 1:nz+1] + ue[1:nx+1, 1:ny+1, 1:nz+1])
     uu_left = u_interp * u_interp # Fixed: symmetric flux
     duudx = (uu_right - uu_left) / dx
 
     # d(vu)/dy: v at y-faces, interpolate in x only to get v at u-location
-    v_interp = 0.5 * (v[1:nx, 1:ny+1, 1:nz+1] + v[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 2:ny+2, 1:nz+1])
+    v_interp = 0.5 * (v[1:nx+1, 1:ny+1, 1:nz+1] + v[2:nx+2, 1:ny+1, 1:nz+1])
+    u_interp_y = 0.5 * (ue[1:nx+1, 1:ny+1, 1:nz+1] + ue[1:nx+1, 2:ny+2, 1:nz+1])
     vu_top = v_interp * u_interp_y
-    v_interp = 0.5 * (v[1:nx, 0:ny, 1:nz+1] + v[2:nx+1, 0:ny, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 0:ny, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
+    v_interp = 0.5 * (v[1:nx+1, 0:ny, 1:nz+1] + v[2:nx+2, 0:ny, 1:nz+1])
+    u_interp_y = 0.5 * (ue[1:nx+1, 0:ny, 1:nz+1] + ue[1:nx+1, 1:ny+1, 1:nz+1])
     vu_bottom = v_interp * u_interp_y
     dvudy = (vu_top - vu_bottom) / dy
 
     # d(wu)/dz: w at z-faces, interpolate in x only to get w at u-location
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 1:nz+1] + w[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 2:nz+2])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz+1] + w[2:nx+2, 1:ny+1, 1:nz+1])
+    u_interp_z = 0.5 * (ue[1:nx+1, 1:ny+1, 1:nz+1] + ue[1:nx+1, 1:ny+1, 2:nz+2])
     wu_top = w_interp * u_interp_z
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 0:nz] + w[2:nx+1, 1:ny+1, 0:nz])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 0:nz] + u[1:nx, 1:ny+1, 1:nz+1])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz] + w[2:nx+2, 1:ny+1, 0:nz])
+    u_interp_z = 0.5 * (ue[1:nx+1, 1:ny+1, 0:nz] + ue[1:nx+1, 1:ny+1, 1:nz+1])
     wu_bottom = w_interp * u_interp_z
 
     dz_avg = dz_f[0:nz].view(1, 1, -1)
     dwudz = (wu_top - wu_bottom) / dz_avg
 
-    adv_u[1:nx, 1:ny+1, 1:nz+1] = duudx + dvudy + dwudz
+    adv_u[1:nx+1, 1:ny+1, 1:nz+1] = duudx + dvudy + dwudz
 
     return adv_u
 
@@ -171,37 +180,43 @@ def advection_v(u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
     """
     Compute advection term for v-component using conservative flux form
     JIT-compiled for GPU performance
+
+    Evaluated on y-faces j = 1..ny -- the same argument as advection_u, one axis
+    over. v has shape ny+1 in y and v[:, 0] is the periodic ghost of v[:, ny],
+    so j = ny is a physical face and must be advected. ``ve[:, ny+1] == v[:, 1]``
+    supplies its upper neighbour.
     """
     adv_v = torch.zeros_like(v)
+    ve = torch.cat([v, v[:, 1:2, :]], dim=1)
 
     # d(uv)/dx: u at x-faces, interpolate in y only to get u at v-location
-    u_interp = 0.5 * (u[1:nx+1, 1:ny, 1:nz+1] + u[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[2:nx+2, 1:ny, 1:nz+1])
+    u_interp = 0.5 * (u[1:nx+1, 1:ny+1, 1:nz+1] + u[1:nx+1, 2:ny+2, 1:nz+1])
+    v_interp_x = 0.5 * (ve[1:nx+1, 1:ny+1, 1:nz+1] + ve[2:nx+2, 1:ny+1, 1:nz+1])
     uv_right = u_interp * v_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny, 1:nz+1] + u[0:nx, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[0:nx, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
+    u_interp = 0.5 * (u[0:nx, 1:ny+1, 1:nz+1] + u[0:nx, 2:ny+2, 1:nz+1])
+    v_interp_x = 0.5 * (ve[0:nx, 1:ny+1, 1:nz+1] + ve[1:nx+1, 1:ny+1, 1:nz+1])
     uv_left = u_interp * v_interp_x
     duvdx = (uv_right - uv_left) / dx
 
     # d(vv)/dy: v already at y-faces, interpolate to get v at face centers
-    v_interp = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 2:ny+1, 1:nz+1])
+    v_interp = 0.5 * (ve[1:nx+1, 1:ny+1, 1:nz+1] + ve[1:nx+1, 2:ny+2, 1:nz+1])
     vv_top = v_interp * v_interp # Fixed: symmetric flux
-    v_interp = 0.5 * (v[1:nx+1, 0:ny-1, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
+    v_interp = 0.5 * (ve[1:nx+1, 0:ny, 1:nz+1] + ve[1:nx+1, 1:ny+1, 1:nz+1])
     vv_bottom = v_interp * v_interp # Fixed: symmetric flux
     dvvdy = (vv_top - vv_bottom) / dy
 
     # d(wv)/dz: w at z-faces, interpolate in y only to get w at v-location
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 1:nz+1] + w[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 2:nz+2])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz+1] + w[1:nx+1, 2:ny+2, 1:nz+1])
+    v_interp_z = 0.5 * (ve[1:nx+1, 1:ny+1, 1:nz+1] + ve[1:nx+1, 1:ny+1, 2:nz+2])
     wv_top = w_interp * v_interp_z
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 0:nz] + w[1:nx+1, 2:ny+1, 0:nz])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 0:nz] + v[1:nx+1, 1:ny, 1:nz+1])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz] + w[1:nx+1, 2:ny+2, 0:nz])
+    v_interp_z = 0.5 * (ve[1:nx+1, 1:ny+1, 0:nz] + ve[1:nx+1, 1:ny+1, 1:nz+1])
     wv_bottom = w_interp * v_interp_z
 
     dz_avg = dz_f[0:nz].view(1, 1, -1)
     dwvdz = (wv_top - wv_bottom) / dz_avg
 
-    adv_v[1:nx+1, 1:ny, 1:nz+1] = duvdx + dvvdy + dwvdz
+    adv_v[1:nx+1, 1:ny+1, 1:nz+1] = duvdx + dvvdy + dwvdz
 
     return adv_v
 
@@ -1075,28 +1090,33 @@ def compute_momentum_rhs_fused_imex(
     # ==================================================================
 
     # --- ADVECTION (same as v2 kernel) ---
+    # On ALL x-faces [1:nx+1]: u[0] is the periodic ghost of u[nx], so face nx
+    # is physical. Omitting it costs the flux form its telescoping property and
+    # leaks ~1/nx of the streamwise momentum budget (see advection_u).
+    u_ext_x = torch.cat([u, u[1:2, :, :]], dim=0)
+
     # d(uu)/dx
-    u_interp = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[2:nx+1, 1:ny+1, 1:nz+1])
+    u_interp = 0.5 * (u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] + u_ext_x[2:nx+2, 1:ny+1, 1:nz+1])
     uu_right = u_interp * u_interp
-    u_interp = 0.5 * (u[0:nx-1, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
+    u_interp = 0.5 * (u_ext_x[0:nx, 1:ny+1, 1:nz+1] + u_ext_x[1:nx+1, 1:ny+1, 1:nz+1])
     uu_left = u_interp * u_interp
     duudx = (uu_right - uu_left) * dx_inv
 
     # d(vu)/dy
-    v_interp = 0.5 * (v[1:nx, 1:ny+1, 1:nz+1] + v[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 2:ny+2, 1:nz+1])
+    v_interp = 0.5 * (v[1:nx+1, 1:ny+1, 1:nz+1] + v[2:nx+2, 1:ny+1, 1:nz+1])
+    u_interp_y = 0.5 * (u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] + u_ext_x[1:nx+1, 2:ny+2, 1:nz+1])
     vu_top = v_interp * u_interp_y
-    v_interp = 0.5 * (v[1:nx, 0:ny, 1:nz+1] + v[2:nx+1, 0:ny, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 0:ny, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
+    v_interp = 0.5 * (v[1:nx+1, 0:ny, 1:nz+1] + v[2:nx+2, 0:ny, 1:nz+1])
+    u_interp_y = 0.5 * (u_ext_x[1:nx+1, 0:ny, 1:nz+1] + u_ext_x[1:nx+1, 1:ny+1, 1:nz+1])
     vu_bottom = v_interp * u_interp_y
     dvudy = (vu_top - vu_bottom) * dy_inv
 
     # d(wu)/dz
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 1:nz+1] + w[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 2:nz+2])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz+1] + w[2:nx+2, 1:ny+1, 1:nz+1])
+    u_interp_z = 0.5 * (u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] + u_ext_x[1:nx+1, 1:ny+1, 2:nz+2])
     wu_top = w_interp * u_interp_z
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 0:nz] + w[2:nx+1, 1:ny+1, 0:nz])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 0:nz] + u[1:nx, 1:ny+1, 1:nz+1])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz] + w[2:nx+2, 1:ny+1, 0:nz])
+    u_interp_z = 0.5 * (u_ext_x[1:nx+1, 1:ny+1, 0:nz] + u_ext_x[1:nx+1, 1:ny+1, 1:nz+1])
     wu_bottom = w_interp * u_interp_z
     dz_avg = dz_f_inv[0, 0, 0:nz]
     dwudz = (wu_top - wu_bottom) * dz_avg
@@ -1106,7 +1126,6 @@ def compute_momentum_rhs_fused_imex(
     # --- XY-DIFFUSION ONLY (no Z-diffusion) ---
 
     # d2u/dx2 - periodic
-    u_ext_x = torch.cat([u, u[1:2, :, :]], dim=0)
     d2u_dx2 = (u_ext_x[2:nx+2, 1:ny+1, 1:nz+1] -
                2.0 * u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] +
                u_ext_x[0:nx, 1:ny+1, 1:nz+1]) * nu_dx2
@@ -1119,35 +1138,38 @@ def compute_momentum_rhs_fused_imex(
     diffusion_xy_u = d2u_dx2 + d2u_dy2  # Note: NO d2u_dz2
 
     # Combine: RHS = diffusion_xy - advection
-    rhs_u[1:nx, 1:ny+1, 1:nz+1] = diffusion_xy_u[0:nx-1, :, :] - advection_u
+    rhs_u[1:nx+1, 1:ny+1, 1:nz+1] = diffusion_xy_u - advection_u
 
     # ==================================================================
     # V-COMPONENT: Fused advection + XY-diffusion
     # ==================================================================
 
     # --- ADVECTION ---
+    # On ALL y-faces [1:ny+1] -- same reasoning as the u block, one axis over.
+    v_ext_y = torch.cat([v, v[:, 1:2, :]], dim=1)
+
     # d(uv)/dx
-    u_interp = 0.5 * (u[1:nx+1, 1:ny, 1:nz+1] + u[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[2:nx+2, 1:ny, 1:nz+1])
+    u_interp = 0.5 * (u[1:nx+1, 1:ny+1, 1:nz+1] + u[1:nx+1, 2:ny+2, 1:nz+1])
+    v_interp_x = 0.5 * (v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] + v_ext_y[2:nx+2, 1:ny+1, 1:nz+1])
     uv_right = u_interp * v_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny, 1:nz+1] + u[0:nx, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[0:nx, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
+    u_interp = 0.5 * (u[0:nx, 1:ny+1, 1:nz+1] + u[0:nx, 2:ny+2, 1:nz+1])
+    v_interp_x = 0.5 * (v_ext_y[0:nx, 1:ny+1, 1:nz+1] + v_ext_y[1:nx+1, 1:ny+1, 1:nz+1])
     uv_left = u_interp * v_interp_x
     duvdx = (uv_right - uv_left) * dx_inv
 
     # d(vv)/dy
-    v_interp = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 2:ny+1, 1:nz+1])
+    v_interp = 0.5 * (v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] + v_ext_y[1:nx+1, 2:ny+2, 1:nz+1])
     vv_top = v_interp * v_interp
-    v_interp = 0.5 * (v[1:nx+1, 0:ny-1, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
+    v_interp = 0.5 * (v_ext_y[1:nx+1, 0:ny, 1:nz+1] + v_ext_y[1:nx+1, 1:ny+1, 1:nz+1])
     vv_bottom = v_interp * v_interp
     dvvdy = (vv_top - vv_bottom) * dy_inv
 
     # d(wv)/dz
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 1:nz+1] + w[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 2:nz+2])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz+1] + w[1:nx+1, 2:ny+2, 1:nz+1])
+    v_interp_z = 0.5 * (v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] + v_ext_y[1:nx+1, 1:ny+1, 2:nz+2])
     wv_top = w_interp * v_interp_z
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 0:nz] + w[1:nx+1, 2:ny+1, 0:nz])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 0:nz] + v[1:nx+1, 1:ny, 1:nz+1])
+    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz] + w[1:nx+1, 2:ny+2, 0:nz])
+    v_interp_z = 0.5 * (v_ext_y[1:nx+1, 1:ny+1, 0:nz] + v_ext_y[1:nx+1, 1:ny+1, 1:nz+1])
     wv_bottom = w_interp * v_interp_z
     dz_avg = dz_f_inv[0, 0, 0:nz]
     dwvdz = (wv_top - wv_bottom) * dz_avg
@@ -1162,7 +1184,6 @@ def compute_momentum_rhs_fused_imex(
                v[0:nx, 1:ny+1, 1:nz+1]) * nu_dx2
 
     # d2v/dy2 - periodic
-    v_ext_y = torch.cat([v, v[:, 1:2, :]], dim=1)
     d2v_dy2 = (v_ext_y[1:nx+1, 2:ny+2, 1:nz+1] -
                2.0 * v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] +
                v_ext_y[1:nx+1, 0:ny, 1:nz+1]) * nu_dy2
@@ -1170,7 +1191,7 @@ def compute_momentum_rhs_fused_imex(
     diffusion_xy_v = d2v_dx2 + d2v_dy2  # Note: NO d2v_dz2
 
     # Combine
-    rhs_v[1:nx+1, 1:ny, 1:nz+1] = diffusion_xy_v[:, 0:ny-1, :] - advection_v
+    rhs_v[1:nx+1, 1:ny+1, 1:nz+1] = diffusion_xy_v - advection_v
 
     # ==================================================================
     # W-COMPONENT: Fused advection + XY-diffusion

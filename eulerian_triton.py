@@ -43,10 +43,13 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
     J = (offs // NZT) % NYT
     I = offs // (NZT * NYT)
 
-    if COMP == 0:      # u: x-faces 1..nx-1, y centers 1..ny, z centers 1..nz
-        inside = (I >= 1) & (I < nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K <= nz)
-    elif COMP == 1:    # v: x centers 1..nx, y-faces 1..ny-1, z centers 1..nz
-        inside = (I >= 1) & (I <= nx) & (J >= 1) & (J < ny) & (K >= 1) & (K <= nz)
+    # u covers x-faces 1..nx and v y-faces 1..ny -- EVERY distinct face. u[0] is
+    # the periodic ghost of u[nx], so face nx is physical; omitting it costs the
+    # flux form its telescoping property (see operators.advection_u).
+    if COMP == 0:      # u: x-faces 1..nx, y centers 1..ny, z centers 1..nz
+        inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K <= nz)
+    elif COMP == 1:    # v: x centers 1..nx, y-faces 1..ny, z centers 1..nz
+        inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K <= nz)
     else:              # w: x centers 1..nx, y centers 1..ny, z-faces 1..nz-1
         inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K < nz)
     mi = m & inside
@@ -59,10 +62,18 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
     ui = I * SUX + J * SUY + K
     vi = I * SVX + J * SVY + K
     wi = I * SWX + J * SWY + K
+    # Periodic wrap for a component's own +1 neighbour at the last face: u is
+    # stored 0..nx, so u[nx+1] does not exist and the neighbour of face nx is
+    # face 1 (u[0] == u[nx]). This is the Triton equivalent of the one-column
+    # extension torch.cat([u, u[1:2]]) used in operators.py. Only the component's
+    # OWN staggered direction needs it -- v and w are nx+2 wide in x and already
+    # carry a valid ghost at index nx+1.
+    uip = tl.where(I == nx, 1, I + 1) * SUX + J * SUY + K
+    vjp = I * SVX + tl.where(J == ny, 1, J + 1) * SVY + K
 
     if COMP == 0:
         uc = tl.load(U + ui, mask=mi, other=0.0)
-        uxp = tl.load(U + ui + SUX, mask=mi, other=0.0)
+        uxp = tl.load(U + uip, mask=mi, other=0.0)
         uxm = tl.load(U + ui - SUX, mask=mi, other=0.0)
         uyp = tl.load(U + ui + SUY, mask=mi, other=0.0)
         uym = tl.load(U + ui - SUY, mask=mi, other=0.0)
@@ -96,7 +107,7 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
         vc = tl.load(V + vi, mask=mi, other=0.0)
         vxp = tl.load(V + vi + SVX, mask=mi, other=0.0)
         vxm = tl.load(V + vi - SVX, mask=mi, other=0.0)
-        vyp = tl.load(V + vi + SVY, mask=mi, other=0.0)
+        vyp = tl.load(V + vjp, mask=mi, other=0.0)
         vym = tl.load(V + vi - SVY, mask=mi, other=0.0)
         vzp = tl.load(V + vi + 1, mask=mi, other=0.0)
         vzm = tl.load(V + vi - 1, mask=mi, other=0.0)
