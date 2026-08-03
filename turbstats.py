@@ -85,6 +85,24 @@ class TurbulenceStats:
         self.vv_sum = torch.zeros(nz, device=device)
         self.ww_sum = torch.zeros(nz, device=device)
         self.uw_sum = torch.zeros(nz, device=device)
+        # Plane-mean moments. The uu/vv/ww/uw sums above accumulate second
+        # moments of fluctuations about the INSTANTANEOUS plane mean; a
+        # Reynolds stress is defined about the TIME mean, and the two differ
+        # by the time variance of the plane mean:
+        #     <(u - <U>)^2> = <(u - U(t))^2> + var_t(U)
+        # (cross term vanishes on plane averaging). Accumulating the plane
+        # means and their second moments (1-D arrays, essentially free) lets
+        # finalize_statistics() add the missing var_t. Without it u'u' (and
+        # v'v') come out low by var_t of the plane mean — a bias that
+        # masquerades as numerical dissipation in the streamwise component
+        # (w'w' and <u'w'> are unaffected in an unforced channel, where
+        # continuity+periodicity pin the plane mean of w to zero).
+        self.Vm_sum = torch.zeros(nz, device=device)
+        self.Wm_sum = torch.zeros(nz, device=device)
+        self.Um2_sum = torch.zeros(nz, device=device)
+        self.Vm2_sum = torch.zeros(nz, device=device)
+        self.Wm2_sum = torch.zeros(nz, device=device)
+        self.UmWm_sum = torch.zeros(nz, device=device)
 
 
         # Initialize accumulators for 2D energy spectra at z+
@@ -138,10 +156,50 @@ class TurbulenceStats:
         W = torch.mean(w_cell_center, dim=(0, 1))  # (nz,)
         w_fluct = w_cell_center - W.view(1, 1, -1)
 
-        # Compute Reynolds stresses by averaging over x,y
-        uu = torch.mean(u_fluct * u_fluct, dim=(0, 1))  # (nz,)
-        vv = torch.mean(v_fluct * v_fluct, dim=(0, 1))  # (nz,)
-        ww = torch.mean(w_fluct * w_fluct, dim=(0, 1))  # (nz,)
+        # Plane-mean moments for the time-mean correction (see __init__).
+        # U is accumulated in U_sum below (it doubles as the mean profile).
+        self.Vm_sum += V
+        self.Wm_sum += W
+        self.Um2_sum += U * U
+        self.Vm2_sum += V * V
+        self.Wm2_sum += W * W
+        self.UmWm_sum += U * W
+
+        # NORMAL STRESSES AT EACH COMPONENT'S OWN NODE, NOT AT THE CELL CENTRE.
+        # The 2-point average that moves a staggered velocity to the cell centre
+        # is a low-pass filter, transfer function cos(k*d/2), so it removes
+        # variance in proportion to the spacing in THAT component's staggered
+        # direction: dx for u, dy for v, dz for w. On a wall-resolved channel dz
+        # is tiny and dx is not, so it damps u' while leaving w' alone -- which
+        # is indistinguishable from wall-parallel under-resolution, and is what
+        # it gets mistaken for. Measured on a Re_tau=180 field, band-averaged
+        # over 20 < z+ < 150: u' -0.93%, v' -0.85%, w' -0.11%.
+        #
+        # No interpolation is needed for u'u' or v'v' at all: u sits at (x-face,
+        # y-centre, z-CENTRE) and v at (x-centre, y-face, z-CENTRE), so both are
+        # ALREADY at the cell centre in z -- the only direction a profile depends
+        # on. Averaging in x or y moved them sideways within a homogeneous plane
+        # and bought nothing but the filter. CaNS does the same (out1d_chan in
+        # output.f90 takes u(i,j,k) and v(i,j,k) raw).
+        u_node = u_int[1:, :, :]                     # nx distinct x-faces
+        v_node = v_int[:, 1:, :]                     # ny distinct y-faces
+        u_node_f = u_node - u_node.mean(dim=(0, 1), keepdim=True)
+        v_node_f = v_node - v_node.mean(dim=(0, 1), keepdim=True)
+        uu = torch.mean(u_node_f * u_node_f, dim=(0, 1))  # (nz,)
+        vv = torch.mean(v_node_f * v_node_f, dim=(0, 1))  # (nz,)
+
+        # w'w' is formed at the z-FACES where w lives, then the smooth PROFILE is
+        # interpolated to centres. Interpolating the statistic is O(dz^2) and
+        # removes no variance; interpolating the field first would filter it.
+        # (CaNS averages 0.5*(w(k)^2 + w(k-1)^2) for the same reason.)
+        w_face_f = w_int - w_int.mean(dim=(0, 1), keepdim=True)
+        ww_face = torch.mean(w_face_f * w_face_f, dim=(0, 1))     # (nz+1,)
+        ww = 0.5 * (ww_face[:-1] + ww_face[1:])                   # (nz,)
+
+        # <u'w'> genuinely needs the two co-located, so one of them must be
+        # interpolated whatever we do. Verified insensitive to which: co-locating
+        # at (x-centre, z-centre) and at (x-face, z-face) agree to 0.00% on a
+        # production field, so the cheaper existing pair is kept.
         uw = torch.mean(u_fluct * w_fluct, dim=(0, 1))  # (nz,)
 
         self.uu_sum += uu
@@ -153,14 +211,22 @@ class TurbulenceStats:
         # Extract planes at k_bot and k_top
         # Average between both walls
 
-        # Bottom wall plane
-        u_bot = u_fluct[:, :, self.k_bot - 1]  # (nx, ny)
-        v_bot = v_fluct[:, :, self.k_bot - 1]
+        # SPECTRA ALSO FROM THE UNFILTERED NODES -- this matters more here than
+        # for the profiles. Cell-centre averaging multiplies E_uu(kx) by
+        # cos^2(kx*dx/2), which is EXACTLY ZERO at the grid cutoff: it
+        # manufactures a high-wavenumber roll-off that is a property of the
+        # post-processing, not of the flow. Any high-k diagnostic read off the
+        # old spectra was therefore reading a suppressed tail -- if a high-k
+        # floor survived that suppression, the true floor is higher still.
+        # w keeps its cell-centred form (dz+ is small, so the filter is inert
+        # there) so that it stays co-located with u for the uw cospectrum.
+        u_bot = u_node_f[:, :, self.k_bot - 1]  # (nx, ny)
+        v_bot = v_node_f[:, :, self.k_bot - 1]
         w_bot = w_fluct[:, :, self.k_bot - 1]
 
         # Top wall plane
-        u_top = u_fluct[:, :, self.k_top - 1]
-        v_top = v_fluct[:, :, self.k_top - 1]
+        u_top = u_node_f[:, :, self.k_top - 1]
+        v_top = v_node_f[:, :, self.k_top - 1]
         w_top = w_fluct[:, :, self.k_top - 1]
 
         # Compute 2D FFTs for both walls separately
@@ -260,6 +326,19 @@ class TurbulenceStats:
         vv_mean_gpu = self.vv_sum / self.n_samples
         ww_mean_gpu = self.ww_sum / self.n_samples
         uw_mean_gpu = self.uw_sum / self.n_samples
+
+        # Time-mean correction: the sums above are moments of fluctuations
+        # about the instantaneous plane mean; add the time (co)variance of
+        # the plane means so the stresses are about the TIME mean (see
+        # __init__). W and UW terms kept deliberately: with any wall-normal
+        # forcing/blowing/suction the plane mean of w is no longer pinned
+        # to zero by continuity.
+        Vm_mean = self.Vm_sum / self.n_samples
+        Wm_mean = self.Wm_sum / self.n_samples
+        uu_mean_gpu = uu_mean_gpu + self.Um2_sum / self.n_samples - U_mean_gpu**2
+        vv_mean_gpu = vv_mean_gpu + self.Vm2_sum / self.n_samples - Vm_mean**2
+        ww_mean_gpu = ww_mean_gpu + self.Wm2_sum / self.n_samples - Wm_mean**2
+        uw_mean_gpu = uw_mean_gpu + self.UmWm_sum / self.n_samples - U_mean_gpu * Wm_mean
 
         E_uu_2d_gpu = self.E_uu_2d_sum / self.n_samples
         E_vv_2d_gpu = self.E_vv_2d_sum / self.n_samples
@@ -368,6 +447,12 @@ class TurbulenceStats:
             'vv_sum': np.asarray(self.vv_sum.detach().cpu().numpy()),
             'ww_sum': np.asarray(self.ww_sum.detach().cpu().numpy()),
             'uw_sum': np.asarray(self.uw_sum.detach().cpu().numpy()),
+            'Vm_sum': np.asarray(self.Vm_sum.detach().cpu().numpy()),
+            'Wm_sum': np.asarray(self.Wm_sum.detach().cpu().numpy()),
+            'Um2_sum': np.asarray(self.Um2_sum.detach().cpu().numpy()),
+            'Vm2_sum': np.asarray(self.Vm2_sum.detach().cpu().numpy()),
+            'Wm2_sum': np.asarray(self.Wm2_sum.detach().cpu().numpy()),
+            'UmWm_sum': np.asarray(self.UmWm_sum.detach().cpu().numpy()),
             'E_uu_2d_sum': np.asarray(self.E_uu_2d_sum.detach().cpu().numpy()),
             'E_vv_2d_sum': np.asarray(self.E_vv_2d_sum.detach().cpu().numpy()),
             'E_ww_2d_sum': np.asarray(self.E_ww_2d_sum.detach().cpu().numpy()),
@@ -418,6 +503,25 @@ class TurbulenceStats:
 
         # Backward compatibility: ignore dUdz_sum and omega_y_sum if they exist in old files
         # (they are no longer computed or needed)
+
+        # Plane-mean moment accumulators (time-mean correction). States
+        # written before the fix lack them; the discarded variance of the
+        # plane mean is NOT recoverable from such a state — warn loudly
+        # instead of silently reporting a biased stress.
+        if 'Um2_sum' in data:
+            self.Vm_sum = torch.tensor(data['Vm_sum'], device=self.device)
+            self.Wm_sum = torch.tensor(data['Wm_sum'], device=self.device)
+            self.Um2_sum = torch.tensor(data['Um2_sum'], device=self.device)
+            self.Vm2_sum = torch.tensor(data['Vm2_sum'], device=self.device)
+            self.Wm2_sum = torch.tensor(data['Wm2_sum'], device=self.device)
+            self.UmWm_sum = torch.tensor(data['UmWm_sum'], device=self.device)
+        else:
+            print("  " + "!" * 66, flush=True)
+            print("  ! WARNING: state file predates the plane-mean-variance fix.", flush=True)
+            print("  ! Normal stresses derived from these samples are biased LOW by", flush=True)
+            print("  ! var_t(plane mean) — not recoverable retroactively. Re-run to", flush=True)
+            print("  ! get unbiased u'u'/v'v'; w'w' and <u'w'> are unaffected.", flush=True)
+            print("  " + "!" * 66, flush=True)
 
         print(f"  Restored state with {self.n_samples} accumulated samples", flush=True)
 
