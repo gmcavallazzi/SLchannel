@@ -28,14 +28,14 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 11, 'mathtext.fontset': 'stix',
                      'font.family': 'STIXGeneral'})
 
-REF = 'results_180cans_ref/turbulence_stats.npz'
-SWEEP = [(0.034, 'results_180cans_sl_fp32/turbulence_stats.npz'),
-         (0.030, 'results_180cans_sl_dt30/turbulence_stats.npz'),
-         (0.0255, 'results_180cans_sl_dt255/turbulence_stats.npz'),
-         (0.021, 'results_180cans_sl_dt21/turbulence_stats.npz'),
-         (0.017, 'results_180cans_sl_dt17/turbulence_stats.npz'),
-         (0.0085, 'results_180cans_sl_dt85/turbulence_stats.npz'),
-         (0.00425, 'results_180cans_sl_dt425/turbulence_stats.npz')]
+REF = 'data/m3_stats/ref.npz'  # results_180cans_* dirs removed 2026-08-03
+SWEEP = [(0.034, 'data/m3_stats/sl_fp32.npz'),
+         (0.030, 'data/m3_stats/sl_dt30.npz'),
+         (0.0255, 'data/m3_stats/sl_dt255.npz'),
+         (0.021, 'data/m3_stats/sl_dt21.npz'),
+         (0.017, 'data/m3_stats/sl_dt17.npz'),
+         (0.0085, 'data/m3_stats/sl_dt85.npz'),
+         (0.00425, 'data/m3_stats/sl_dt425.npz')]
 
 ref = np.load(REF)
 tail = {k: ref[k].sum(axis=1)[-10:].mean() for k in ('E_uu_2d', 'E_vv_2d', 'E_ww_2d')}

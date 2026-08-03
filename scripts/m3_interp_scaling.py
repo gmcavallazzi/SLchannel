@@ -26,12 +26,12 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 11, 'mathtext.fontset': 'stix',
                      'font.family': 'STIXGeneral'})
 
-RUNS = [('results_180cans_ref/turbulence_stats.npz', 'Eulerian', 'C0', '-'),
-        ('results_180cans_sl_fp32/turbulence_stats.npz', 'SL cubic fp32', 'C1', '-'),
-        ('results_180cans_sl_fp64/turbulence_stats.npz', 'SL cubic fp64', 'C2', '--'),
-        ('results_180cans_sl_o6/turbulence_stats.npz', 'SL quintic fp32', 'C3', '-'),
-        ('results_180cans_sl_spline/turbulence_stats.npz', 'SL spline fp32', 'C4', '-'),
-        ('results_180cans_sl_traj4/turbulence_stats.npz', 'SL cubic traj4 fp32', 'C5', '-')]
+RUNS = [('data/m3_stats/ref.npz', 'Eulerian', 'C0', '-'),
+        ('data/m3_stats/sl_fp32.npz', 'SL cubic fp32', 'C1', '-'),
+        ('data/m3_stats/sl_fp64.npz', 'SL cubic fp64', 'C2', '--'),
+        ('data/m3_stats/sl_o6.npz', 'SL quintic fp32', 'C3', '-'),
+        ('data/m3_stats/sl_spline.npz', 'SL spline fp32', 'C4', '-'),
+        ('data/m3_stats/sl_traj4.npz', 'SL cubic traj4 fp32', 'C5', '-')]
 
 data = []
 for p, lab, c, ls in RUNS:

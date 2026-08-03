@@ -24,9 +24,9 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 11, 'mathtext.fontset': 'stix',
                      'font.family': 'STIXGeneral'})
 
-RUNS = [('results_180cans_ref/turbulence_stats.npz', 'Eulerian', 'C0'),
-        ('results_180cans_sl_fp32/turbulence_stats.npz', 'SL fp32', 'C1'),
-        ('results_180cans_sl_fp64/turbulence_stats.npz', 'SL fp64', 'C2')]
+RUNS = [('data/m3_stats/ref.npz', 'Eulerian', 'C0'),
+        ('data/m3_stats/sl_fp32.npz', 'SL fp32', 'C1'),
+        ('data/m3_stats/sl_fp64.npz', 'SL fp64', 'C2')]
 
 data = [(np.load(p), lab, c) for p, lab, c in RUNS]
 
