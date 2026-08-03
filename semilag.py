@@ -673,8 +673,12 @@ class SLAdvector:
     def advect(self, u, v, w, u_mid, v_mid, w_mid, dt_t, extra_rhs=None):
         """Semi-Lagrangian advection of (u, v, w).
 
-        u_mid/v_mid/w_mid: trajectory velocity at t^{n+1/2} (BC-consistent
-        ghost-shaped fields, e.g. the AB2 extrapolation 1.5*u^n - 0.5*u^{n-1}).
+        u_mid/v_mid/w_mid: the advecting (trajectory) velocity — BC-consistent
+        ghost-shaped fields. The machinery is agnostic to its time level: the
+        v1/v2 schemes pass an estimate of V^{n+1/2} (e.g. the AB2
+        extrapolation 1.5*u^n - 0.5*u^{n-1}); the bdf2 scheme passes the
+        frozen U* = 2*u^n - u^{n-1} and calls advect() twice (dt_t and
+        2*dt_t) for the two feet of the same characteristic.
 
         Returns (ustar, vstar, wstar) — ghost-shaped, interiors filled with the
         field interpolated at the departure points (ghosts are NOT refreshed

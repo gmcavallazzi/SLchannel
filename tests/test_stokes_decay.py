@@ -30,11 +30,15 @@ def run():
         solver.apply_bc_uvw()
         solver.forcing = 0.0
 
+        # disable the exact bulk-flux constraint: the Stokes mode must decay
+        # freely, including its bulk component (this test exercises the
+        # diffusion path, not the mass-flux enforcement)
+        solver._apply_bulk_forcing = lambda dt: (0.0, 0.0)
+
         dt, T = 0.02, 1.0
         n = round(T / dt)
         for _ in range(n):
             solver.step_sl(dt)
-            solver.forcing = 0.0   # freeze the bulk controller for this test
 
         decay = math.exp(-solver.nu * math.pi ** 2 * T)
         exact = decay * torch.sin(math.pi * solver.z_c[1:-1])

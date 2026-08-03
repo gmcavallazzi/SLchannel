@@ -22,9 +22,10 @@ def run_case(time_scheme, order):
                                extra={'sl': {'time_scheme': time_scheme,
                                              'interp_order': order}})
         solver = SLChannelFlow(config_file=cfg)
+        step = solver.step_sl_bdf2 if time_scheme == 'bdf2' else solver.step_sl
         max_div = 0.0
         for _ in range(25):
-            solver.step_sl(0.02)
+            step(0.02)
             div = compute_divergence(solver.u, solver.v, solver.w, solver.nx,
                                      solver.ny, solver.nz, solver.dx, solver.dy,
                                      solver.dz_f)
@@ -38,7 +39,10 @@ def run_case(time_scheme, order):
 
 def run():
     ok = True
-    for time_scheme, order in [('v1', 4), ('v2', 4), ('v1', 6), ('v2', 6)]:
+    # note: under bdf2 n_clamped_last covers BOTH feet (the 2dt foot travels
+    # twice as far), so clamp_frac is over ~6N gather points, not 3N
+    for time_scheme, order in [('v1', 4), ('v2', 4), ('v1', 6), ('v2', 6),
+                               ('bdf2', 4), ('bdf2', 6)]:
         max_div, finite, clamp_frac = run_case(time_scheme, order)
         ok &= report(f"SL step {time_scheme} order={order}",
                      finite and max_div < 1e-10 and clamp_frac < 0.01,

@@ -27,6 +27,17 @@ Note: subtracting the old-pressure gradient AFTER the diffusion solve would
 be algebraically identical to the non-incremental scheme (by linearity of
 the Poisson solve) — the pressure must enter the predictor BEFORE the
 implicit solve, which is what this implementation does.
+'bdf2' ('sl.time_scheme: bdf2') is the Boukir et al. (1997) second-order
+characteristics scheme: BDF2 in time along ONE backward characteristic
+traced with the frozen extrapolated U* = 2V^n - V^{n-1}; V^n and V^{n-1}
+are interpolated at the feet of depths dt and 2dt (each foot integrated
+independently from the arrival point — no "bending"), then
+(3u^{n+1} - 4 ubar + ubarbar)/(2dt) with z-diffusion implicit at arrival
+(theta=1, dt' = 2dt/3) and projection with dt_eff = 2dt/3. BDF2 damps
+high-frequency content strongly (unlike v2's neutrally-stable
+trajectory-CN) — the intended cure for the M3 high-k spectral floor.
+Constant dt assumed (BDF1 re-bootstrap on any dt change; pin dt in
+bdf2 configs).
 """
 
 import os
@@ -162,16 +173,41 @@ class SLChannelFlow:
         self.sl_time_scheme = sl_cfg.get('time_scheme', 'v1')
         self.sl_interp_dtype = sl_cfg.get('interp_dtype', 'fp64')
         self.sl_field_interp = sl_cfg.get('field_interp', 'lagrange')
-        # Trajectory-velocity extrapolation: 'ab2' (V^{n+1/2} = 1.5 V^n -
-        # 0.5 V^{n-1}, the accurate default) or 'none' (V^n — trajectories
-        # degrade to O(dt), DIAGNOSTIC ONLY: isolates AB2-extrapolation noise
-        # as a floor-injection suspect; extrapolating modes that decorrelate
-        # within one step amplifies their variance ~2.5x per step).
+        # Trajectory-velocity estimate at t^{n+1/2}:
+        #   'ab2'  — 1.5 V^n - 0.5 V^{n-1}. Accurate BUT extrapolation
+        #            amplifies content that decorrelates within one step
+        #            (~2.5x variance) — above dt* ~ 1/(k_max u) this pumps a
+        #            high-k spectral floor (M3 finding, 2026-07-04).
+        #   'none' — V^n. Extrapolation-free but O(dt) trajectories;
+        #            diagnostic mode.
+        #   'pc'   — predictor-corrector: one provisional SL advection with
+        #            V^n gives u* = V^{n+1} + O(dt); V^{n+1/2} ~ (V^n + u*)/2
+        #            is O(dt^2) with NO extrapolation anywhere (averaging is
+        #            contractive). Costs one extra velocity-only advect.
         self.sl_traj_extrap = sl_cfg.get('traj_extrapolation', 'ab2')
-        if self.sl_time_scheme not in ['v1', 'v2']:
-            raise ValueError(f"sl.time_scheme must be 'v1' or 'v2', got {self.sl_time_scheme}")
-        if self.sl_traj_extrap not in ['ab2', 'none']:
-            raise ValueError(f"sl.traj_extrapolation must be 'ab2' or 'none', got {self.sl_traj_extrap}")
+        # BDF2-characteristics options (Boukir et al. 1997), time_scheme 'bdf2':
+        #   bdf2_pressure: 'noninc' — p^{n+1} = phi (robust, splitting caps
+        #                  velocity self-convergence near O(dt));
+        #                  'inc' — incremental on p_ext = 2p^n - p^{n-1}
+        #                  (O(dt^2); p_ext must enter BEFORE the implicit
+        #                  solve, same rule as v2).
+        #   bdf2_xy_rhs:   'extrap' — 2R^n - R^{n-1} at arrival (consistent
+        #                  at t^{n+1}); 'lagged' — R^n (diagnostic, O(dt) in
+        #                  a term ~100x smaller than the trajectory channel).
+        self.sl_bdf2_pressure = sl_cfg.get('bdf2_pressure', 'noninc')
+        self.sl_bdf2_xy_rhs = sl_cfg.get('bdf2_xy_rhs', 'extrap')
+        if self.sl_time_scheme not in ['v1', 'v2', 'bdf2']:
+            raise ValueError(f"sl.time_scheme must be 'v1', 'v2' or 'bdf2', got {self.sl_time_scheme}")
+        if self.sl_traj_extrap not in ['ab2', 'none', 'pc']:
+            raise ValueError(f"sl.traj_extrapolation must be 'ab2', 'none' or 'pc', got {self.sl_traj_extrap}")
+        if self.sl_bdf2_pressure not in ['noninc', 'inc']:
+            raise ValueError(f"sl.bdf2_pressure must be 'noninc' or 'inc', got {self.sl_bdf2_pressure}")
+        if self.sl_bdf2_xy_rhs not in ['extrap', 'lagged']:
+            raise ValueError(f"sl.bdf2_xy_rhs must be 'extrap' or 'lagged', got {self.sl_bdf2_xy_rhs}")
+        if self.sl_time_scheme == 'bdf2' and 'traj_extrapolation' in sl_cfg:
+            print("WARNING: sl.traj_extrapolation is ignored under time_scheme "
+                  "'bdf2' (the advecting velocity is fixed to U* = 2V^n - V^{n-1})",
+                  flush=True)
 
         # Output settings
         output_config = config.get('output', {})
@@ -179,6 +215,12 @@ class SLChannelFlow:
         self.n_out = output_config.get('n_out', 10)
         self.n_save = output_config.get('n_save', 100)
         self.n_snapshot = output_config.get('n_snapshot', 0)
+        # Time-based snapshots: write fields_t*.npz every t_snapshot SIMULATION
+        # time units (uniform in t+ across runs with different/adaptive dt,
+        # unlike the step-based n_snapshot). Lands on the first step crossing
+        # each threshold (jitter <= dt). 0 disables.
+        self.t_snapshot = output_config.get('t_snapshot', 0.0)
+        self._next_snap_time = None
         os.makedirs(self.results_folder, exist_ok=True)
 
         field_file = config['initialization'].get('field_file', None)
@@ -223,7 +265,14 @@ class SLChannelFlow:
             self.u, self.v, self.w, self.p, self.initial_step, self.time = \
                 initialize_flow_from_file(field_file, device=self.device, reset_time=reset_time)
             self.initial_time = self.time
-            self.forcing = 0.0
+            # restore the bulk-forcing controller state saved in the npz
+            # (resetting to 0 forces a ~50-step re-convergence transient that
+            # would pollute a resumed statistics window)
+            try:
+                self.forcing = float(np.load(field_file)['forcing'])
+                print(f"Restored forcing state: {self.forcing:.6e}", flush=True)
+            except Exception:
+                self.forcing = 0.0
         elif init_type_cfg == 'interpolate':
             if field_file is None:
                 raise ValueError("initialization.type 'interpolate' requires initialization.field_file")
@@ -310,6 +359,14 @@ class SLChannelFlow:
         self._Rxy_u_nm1 = None
         self._Rxy_v_nm1 = None
         self._Rxy_w_nm1 = None
+        # bdf2: far-foot copy (advect() output buffers are persistent and the
+        # second call overwrites them) and constant-dt guard. Under bdf2 the
+        # _P_curr/_P_prev history holds FULL levels p^n / p^{n-1} (not v2's
+        # half levels); all bdf2 pressure logic is self-contained below.
+        self._bdf2_acc_u = None
+        self._bdf2_acc_v = None
+        self._bdf2_acc_w = None
+        self._dt_prev_step = None
 
         # Triton fast path for the Eulerian explicit RHS (fair-comparison
         # baseline: same hand-written-kernel treatment as the SL advector).
@@ -443,7 +500,8 @@ class SLChannelFlow:
         rhs_u = diffusion_xy_u(self.u, self.nx, self.ny, self.nz, self.dx, self.dy, self.nu)
         rhs_v = diffusion_xy_v(self.v, self.nx, self.ny, self.nz, self.dx, self.dy, self.nu)
         rhs_w = diffusion_xy_w(self.w, self.nx, self.ny, self.nz, self.dx, self.dy, self.nu)
-        rhs_u[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] += self.forcing
+        # NOTE: no bulk forcing here -- it is applied as an exact uniform shift
+        # at the end of the step (see _apply_bulk_forcing).
         return rhs_u, rhs_v, rhs_w
 
     def step_sl(self, dt):
@@ -452,10 +510,79 @@ class SLChannelFlow:
         self.apply_bc_uvw()
         dt_t = torch.as_tensor(dt, device=self.device, dtype=torch.float64)
 
+        # ---- explicit horizontal terms on V^n (also used by the pc
+        # predictor below, BEFORE any v2 time-centering mutates them) ----
+        rhs_u, rhs_v, rhs_w = self._explicit_xy_rhs()
+
         # ---- trajectory velocity at t^{n+1/2} (AB2 extrapolation) ----
         if self.sl_traj_extrap == 'none':
             # diagnostic mode: no extrapolation (O(dt) trajectories)
             u_mid, v_mid, w_mid = self.u, self.v, self.w
+        elif self.sl_traj_extrap == 'pc':
+            # predictor-corrector: u* = SL-advected V^n plus the known O(dt)
+            # tendencies (xy+z viscous, forcing, and the LAGGED pressure
+            # gradient p^{n-1/2} — a delay, not an extrapolation), so
+            # u* = V^{n+1} + O(dt^2) and (V^n + u*)/2 = V^{n+1/2} + O(dt^2):
+            # 2nd order with no extrapolation anywhere. The advection-only
+            # predictor leaves an O(dt) pressure/viscous error in the
+            # mid-velocity and drops the scheme to O(dt) (measured ratio
+            # 2.0 vs 3.9 with tendencies). Averaging is contractive in the
+            # step-decorrelated high-k band, so the AB2 burst mechanism
+            # cannot operate. apply_bc_all rebuilds the ghosts the advect
+            # output leaves stale.
+            if self.u_mid is None:
+                self.u_mid = self.u.clone()
+                self.v_mid = self.v.clone()
+                self.w_mid = self.w.clone()
+            up, vp, wp = self.sl.advect(self.u, self.v, self.w,
+                                        self.u, self.v, self.w, dt_t)
+            up += dt_t * rhs_u
+            vp += dt_t * rhs_v
+            wp += dt_t * rhs_w
+            if self._P_curr is not None:
+                if self._gp_u is None:
+                    self._gp_u = torch.zeros_like(self.u)
+                    self._gp_v = torch.zeros_like(self.v)
+                    self._gp_w = torch.zeros_like(self.w)
+                self._gp_u.zero_(); self._gp_v.zero_(); self._gp_w.zero_()
+                project_velocity(self._gp_u, self._gp_v, self._gp_w, self._P_curr,
+                                 nx, ny, nz, self.dx, self.dy,
+                                 self.dz_c, self.dz_f, 1.0)
+                up += dt_t * self._gp_u
+                vp += dt_t * self._gp_v
+                wp += dt_t * self._gp_w
+            # z-viscous tendency via backward Euler (L-stable): an explicit
+            # dt*rz term violates the near-wall stability limit
+            # (dt*nu/dz_min^2 ~ 3 at dz+ = 0.4) and PUMPS the mid-velocity —
+            # measured as a sustained ~6x tail with the explicit predictor.
+            apply_bc_all(up, vp, wp, self.top_wall_bc_type)
+            up = solve_implicit_diffusion_u(up, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+            vp = solve_implicit_diffusion_v(vp, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+            wp = solve_implicit_diffusion_w(wp, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0)
+            # Project the predictor: only the LAGGED pressure was applied, so
+            # u* carries an O(dt) divergence, and SL trajectories through a
+            # divergent u_mid are compressive (energy-pumping; measured as the
+            # u_tau +127% blow-up). V^n is already solenoidal, so projecting
+            # u* makes u_mid solenoidal with a single extra Poisson solve.
+            # phi_p may alias the Poisson workspace (_pg_out under CUDA
+            # graphs): consumed here, before the main projection replay.
+            apply_bc_all(up, vp, wp, self.top_wall_bc_type)
+            div_p = compute_divergence(up, vp, wp, nx, ny, nz,
+                                       self.dx, self.dy, self.dz_f)
+            phi_p = self._solve_poisson(div_p / dt)
+            up, vp, wp = project_velocity(up, vp, wp, phi_p, nx, ny, nz,
+                                          self.dx, self.dy,
+                                          self.dz_c, self.dz_f, dt_t)
+            self.u_mid.copy_(self.u).add_(up).mul_(0.5)
+            self.v_mid.copy_(self.v).add_(vp).mul_(0.5)
+            self.w_mid.copy_(self.w).add_(wp).mul_(0.5)
+            apply_bc_all(self.u_mid, self.v_mid, self.w_mid, self.top_wall_bc_type)
+            u_mid, v_mid, w_mid = self.u_mid, self.v_mid, self.w_mid
         elif self.u_nm1 is None:
             # bootstrap (first step / after restart): V^{n+1/2} ~ V^n
             self.u_nm1 = self.u.clone()
@@ -476,10 +603,8 @@ class SLChannelFlow:
             self.w_nm1.copy_(self.w)
             u_mid, v_mid, w_mid = self.u_mid, self.v_mid, self.w_mid
 
-        # ---- explicit horizontal terms on V^n ----
-        rhs_u, rhs_v, rhs_w = self._explicit_xy_rhs()
-
         # ---- semi-Lagrangian advection + explicit terms ----
+        # (rhs_u/v/w computed on V^n above, before the trajectory block)
         if self.sl_time_scheme == 'v2':
             # time-center the viscous xy-RHS at t^{n+1/2} via AB2 extrapolation
             # (the pressure below is already extrapolated to n+1/2, and the
@@ -614,12 +739,267 @@ class SLChannelFlow:
             self.p = phi
         self.apply_bc_uvw()
 
-        # ---- bulk forcing controller (lagged relaxation, torChannel-identical) ----
-        u_bulk_current = compute_bulk_velocity(self.u, self.cell_vol_ratio, self.total_volume)
-        relaxation = 0.1
-        self.forcing += (self.U_bulk - u_bulk_current) / dt * relaxation
+        return self._apply_bulk_forcing(dt)
 
+    # ------------------------------------------------------------------
+    # BDF2 characteristics step (Boukir et al. 1997)
+    # ------------------------------------------------------------------
+
+    def _apply_bulk_forcing(self, dt):
+        """Constant mass flux, enforced EXACTLY (CaNS convention).
+
+        A uniform shift of u puts the bulk velocity on target in a single step.
+        Being spatially constant its divergence is zero, so it can be applied
+        after the projection without spoiling it, and the force is DIAGNOSED
+        from the correction rather than steered towards it. CaNS does the same
+        (cmpt_bulk_forcing in rk.f90:304 sets f = velf - mean, bulk_forcing in
+        mom.f90 adds it uniformly).
+
+        This replaces an integral controller of gain 0.1/dt. That controller had
+        no proportional term, so its error equation was
+        d2(du_b)/dt2 = -(0.1/dt^2) du_b -- an undamped oscillator of period ~20
+        steps, damped only incidentally by wall drag, holding the bulk velocity
+        to only ~1.5% rms in the forcing. Worse for this repo specifically, its
+        gain scaled as 1/dt, so its closed-loop response was itself
+        dt-dependent: any dt sweep or SL-vs-Eulerian comparison at differing dt
+        was partly measuring the controller rather than the scheme.
+
+        The body force is no longer added to the momentum RHS either -- it is
+        this shift. Adding it there put it through the AB2 combination, applying
+        1.5*f_n - 0.5*f_{n-1}: an extrapolated control signal.
+        """
+        u_bulk_star = compute_bulk_velocity(self.u, self.cell_vol_ratio,
+                                            self.total_volume)
+        correction = self.U_bulk - u_bulk_star
+        self.u[1:self.nx + 1, 1:self.ny + 1, 1:self.nz + 1] += correction
+        self.apply_bc_uvw()
+        self.forcing = correction / dt
+        u_bulk_current = compute_bulk_velocity(self.u, self.cell_vol_ratio,
+                                               self.total_volume)
         return u_bulk_current, self.forcing
+
+    def _bdf2_forcing_update(self, dt):
+        """Exact mass-flux constraint at the physical dt (see _apply_bulk_forcing)."""
+        return self._apply_bulk_forcing(dt)
+
+    def _step_sl_bdf1_bootstrap(self, dt, dt_t):
+        """One BDF1 (backward-Euler characteristics) step: U* = V^n, single
+        foot at depth dt, theta=1 z-solve and projection with the full dt.
+        Used on the first step, after restart, and on a dt change (the BDF2
+        coefficients assume constant dt). Seeds the u_nm1 / R histories.
+        Same policy as the documented AB2 restart re-bootstrap: one O(dt^2)
+        step, not bit-exact across restarts."""
+        nx, ny, nz = self.nx, self.ny, self.nz
+        rhs_u, rhs_v, rhs_w = self._explicit_xy_rhs()
+
+        # seed histories from the CURRENT state before it is advanced
+        if self.u_nm1 is None:
+            self.u_nm1 = self.u.clone()
+            self.v_nm1 = self.v.clone()
+            self.w_nm1 = self.w.clone()
+        else:
+            self.u_nm1.copy_(self.u)
+            self.v_nm1.copy_(self.v)
+            self.w_nm1.copy_(self.w)
+        if self._Rxy_u_nm1 is None:
+            self._Rxy_u_nm1 = rhs_u.clone()
+            self._Rxy_v_nm1 = rhs_v.clone()
+            self._Rxy_w_nm1 = rhs_w.clone()
+        else:
+            self._Rxy_u_nm1.copy_(rhs_u)
+            self._Rxy_v_nm1.copy_(rhs_v)
+            self._Rxy_w_nm1.copy_(rhs_w)
+
+        ustar, vstar, wstar = self.sl.advect(self.u, self.v, self.w,
+                                             self.u, self.v, self.w, dt_t)
+        ustar[1:nx + 1, 1:ny + 1, 1:nz + 1] += dt_t * rhs_u[1:nx + 1, 1:ny + 1, 1:nz + 1]
+        vstar[1:nx + 1, 1:ny + 1, 1:nz + 1] += dt_t * rhs_v[1:nx + 1, 1:ny + 1, 1:nz + 1]
+        wstar[1:nx + 1, 1:ny + 1, 1:nz] += dt_t * rhs_w[1:nx + 1, 1:ny + 1, 1:nz]
+        self.u, self.v, self.w = ustar, vstar, wstar
+        self.apply_bc_uvw()
+
+        self.u = solve_implicit_diffusion_u(self.u, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+        self.v = solve_implicit_diffusion_v(self.v, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+        self.w = solve_implicit_diffusion_w(self.w, dt_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0)
+        self.apply_bc_uvw()
+
+        div = compute_divergence(self.u, self.v, self.w, nx, ny, nz,
+                                 self.dx, self.dy, self.dz_f)
+        phi = self._solve_poisson(div / dt)
+        self.u, self.v, self.w = project_velocity(self.u, self.v, self.w, phi,
+                                                  nx, ny, nz, self.dx, self.dy,
+                                                  self.dz_c, self.dz_f, dt_t)
+        if self.sl_bdf2_pressure == 'inc':
+            if self._P_curr is None:
+                self._P_curr = phi.clone()
+            else:
+                self._P_curr.copy_(phi)
+            self._P_prev = None
+        self.p = phi
+        self.apply_bc_uvw()
+        self._dt_prev_step = dt
+        return self._bdf2_forcing_update(dt)
+
+    def step_sl_bdf2(self, dt):
+        """BDF2 along characteristics (Boukir et al. 1997):
+            (3 u^{n+1} - 4 ubar^n + ubarbar^{n-1}) / (2 dt)
+                = nu Lap u^{n+1} - grad p + f,
+        with ubar^n / ubarbar^{n-1} the values of V^n / V^{n-1} at the feet
+        (depths dt and 2dt) of ONE characteristic traced backward from the
+        arrival face with the frozen extrapolated U* = 2 V^n - V^{n-1}
+        (both feet MUST use the same U*; each foot is an independent
+        iterated-midpoint integration from the arrival point — never
+        continue the far foot from the near foot, which drops the global
+        order to 1, Boukir Remark 4i). Unlike v2's trajectory-CN, BDF2 is
+        strongly damping at high frequency — the property that should
+        absorb the U* extrapolation noise (the M3 spectral-floor
+        mechanism) instead of remapping it neutrally."""
+        nx, ny, nz = self.nx, self.ny, self.nz
+        self.apply_bc_uvw()
+        dt_t = torch.as_tensor(dt, device=self.device, dtype=torch.float64)
+
+        # constant-dt guard: BDF2 coefficients and the 2dt foot depth assume
+        # a fixed step; re-bootstrap with BDF1 on the first step, after
+        # restart, or whenever dt changes (pin dt in bdf2 configs)
+        if self.u_nm1 is None or self._dt_prev_step is None or \
+                abs(dt - self._dt_prev_step) > 1e-12 * dt:
+            if self._dt_prev_step is not None and self.u_nm1 is not None:
+                print(f"[bdf2] dt changed ({self._dt_prev_step:.6g} -> {dt:.6g}): "
+                      f"BDF1 re-bootstrap", flush=True)
+            return self._step_sl_bdf1_bootstrap(dt, dt_t)
+
+        # ---- explicit xy-diffusion + forcing at arrival ----
+        rhs_u, rhs_v, rhs_w = self._explicit_xy_rhs()
+        if self.sl_bdf2_xy_rhs == 'extrap':
+            # AB2 extrapolation to t^{n+1} (interior-only use, no gathers)
+            Rh_u = 2.0 * rhs_u - self._Rxy_u_nm1
+            Rh_v = 2.0 * rhs_v - self._Rxy_v_nm1
+            Rh_w = 2.0 * rhs_w - self._Rxy_w_nm1
+        else:
+            Rh_u, Rh_v, Rh_w = rhs_u, rhs_v, rhs_w
+        self._Rxy_u_nm1.copy_(rhs_u)
+        self._Rxy_v_nm1.copy_(rhs_v)
+        self._Rxy_w_nm1.copy_(rhs_w)
+
+        # ---- frozen advecting velocity U* = 2 V^n - V^{n-1} (both feet) ----
+        # ghosts of a linear combination of BC-consistent fields are
+        # BC-consistent (BCs are linear)
+        if self.u_mid is None:
+            self.u_mid = self.u.clone()
+            self.v_mid = self.v.clone()
+            self.w_mid = self.w.clone()
+        self.u_mid.copy_(self.u).mul_(2.0).add_(self.u_nm1, alpha=-1.0)
+        self.v_mid.copy_(self.v).mul_(2.0).add_(self.v_nm1, alpha=-1.0)
+        self.w_mid.copy_(self.w).mul_(2.0).add_(self.w_nm1, alpha=-1.0)
+
+        # ---- far foot FIRST (depth 2dt, field V^{n-1}); advect() returns
+        # its persistent buffers, so copy out before the near-foot call ----
+        ub2u, ub2v, ub2w = self.sl.advect(self.u_nm1, self.v_nm1, self.w_nm1,
+                                          self.u_mid, self.v_mid, self.w_mid,
+                                          2.0 * dt_t)
+        nc_far = self.sl.n_clamped_last
+        if self._bdf2_acc_u is None:
+            self._bdf2_acc_u = torch.empty_like(ub2u)
+            self._bdf2_acc_v = torch.empty_like(ub2v)
+            self._bdf2_acc_w = torch.empty_like(ub2w)
+        self._bdf2_acc_u.copy_(ub2u)
+        self._bdf2_acc_v.copy_(ub2v)
+        self._bdf2_acc_w.copy_(ub2w)
+
+        # ---- near foot (depth dt, field V^n) ----
+        ustar, vstar, wstar = self.sl.advect(self.u, self.v, self.w,
+                                             self.u_mid, self.v_mid, self.w_mid,
+                                             dt_t)
+        # diagnostic: report clamped points over BOTH feet
+        self.sl.n_clamped_last = self.sl.n_clamped_last + nc_far
+
+        # ---- BDF2 predictor: u_hat = (4 ubar - ubarbar)/3 + dt_eff*(R - gp) ----
+        dt_eff = (2.0 / 3.0) * dt
+        dt_eff_t = (2.0 / 3.0) * dt_t
+        ustar.mul_(4.0 / 3.0).add_(self._bdf2_acc_u, alpha=-1.0 / 3.0)
+        vstar.mul_(4.0 / 3.0).add_(self._bdf2_acc_v, alpha=-1.0 / 3.0)
+        wstar.mul_(4.0 / 3.0).add_(self._bdf2_acc_w, alpha=-1.0 / 3.0)
+        ustar[1:nx + 1, 1:ny + 1, 1:nz + 1] += dt_eff_t * Rh_u[1:nx + 1, 1:ny + 1, 1:nz + 1]
+        vstar[1:nx + 1, 1:ny + 1, 1:nz + 1] += dt_eff_t * Rh_v[1:nx + 1, 1:ny + 1, 1:nz + 1]
+        wstar[1:nx + 1, 1:ny + 1, 1:nz] += dt_eff_t * Rh_w[1:nx + 1, 1:ny + 1, 1:nz]
+
+        p_ext = None
+        if self.sl_bdf2_pressure == 'inc' and self._P_curr is not None:
+            # extrapolated pressure p_ext = 2 p^n - p^{n-1} (FULL levels);
+            # must enter the predictor BEFORE the implicit solve (same rule
+            # as v2, verified analytically: adding it after the solve is
+            # algebraically identical to non-incremental)
+            if self._P_prev is None:
+                p_ext = self._P_curr
+            else:
+                if self._p_ext is None:
+                    self._p_ext = torch.empty_like(self._P_curr)
+                self._p_ext.copy_(self._P_curr).mul_(2.0).add_(self._P_prev, alpha=-1.0)
+                p_ext = self._p_ext
+            if self._gp_u is None:
+                self._gp_u = torch.zeros_like(self.u)
+                self._gp_v = torch.zeros_like(self.v)
+                self._gp_w = torch.zeros_like(self.w)
+            self._gp_u.zero_(); self._gp_v.zero_(); self._gp_w.zero_()
+            project_velocity(self._gp_u, self._gp_v, self._gp_w, p_ext,
+                             nx, ny, nz, self.dx, self.dy,
+                             self.dz_c, self.dz_f, 1.0)
+            ustar += dt_eff_t * self._gp_u
+            vstar += dt_eff_t * self._gp_v
+            wstar += dt_eff_t * self._gp_w
+
+        # ---- rotate velocity history BEFORE adopting the advector buffers
+        # (ustar aliases them; self.u must still be V^n when copied) ----
+        self.u_nm1.copy_(self.u)
+        self.v_nm1.copy_(self.v)
+        self.w_nm1.copy_(self.w)
+        self.u, self.v, self.w = ustar, vstar, wstar
+        self.apply_bc_uvw()
+
+        # ---- implicit z-diffusion with the BDF2 coefficient:
+        # (I - (2dt/3) nu Dzz) u = u_hat, i.e. theta=1 with dt' = 2dt/3 ----
+        self.u = solve_implicit_diffusion_u(self.u, dt_eff_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+        self.v = solve_implicit_diffusion_v(self.v, dt_eff_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0,
+                                            top_wall_bc_type=self.top_wall_bc_type)
+        self.w = solve_implicit_diffusion_w(self.w, dt_eff_t, nx, ny, nz,
+                                            self.dz_c, self.dz_f, self.nu, theta=1.0)
+        self.apply_bc_uvw()
+
+        # ---- projection with dt_eff (u^{n+1} = u** - (2dt/3) grad phi) ----
+        div = compute_divergence(self.u, self.v, self.w, nx, ny, nz,
+                                 self.dx, self.dy, self.dz_f)
+        phi = self._solve_poisson(div / dt_eff)
+        self.u, self.v, self.w = project_velocity(self.u, self.v, self.w, phi,
+                                                  nx, ny, nz, self.dx, self.dy,
+                                                  self.dz_c, self.dz_f, dt_eff_t)
+        if self.sl_bdf2_pressure == 'inc':
+            # p^{n+1} = p_ext + phi (phi lives in the Poisson workspace,
+            # materialize into the history buffers)
+            if self._P_curr is None:
+                self._P_curr = phi.clone()
+            elif self._P_prev is None:
+                self._P_prev = torch.empty_like(self._P_curr)
+                self._P_prev.copy_(self._P_curr)
+                self._P_curr.copy_(self._P_curr + phi)  # p_ext was P_curr
+            else:
+                # p_ext = 2*P_curr - P_prev is in self._p_ext
+                self._P_prev.copy_(self._P_curr)
+                self._P_curr.copy_(self._p_ext).add_(phi)
+            self.p = self._P_curr
+        else:
+            self.p = phi
+        self.apply_bc_uvw()
+        self._dt_prev_step = dt
+
+        return self._bdf2_forcing_update(dt)
 
     # ------------------------------------------------------------------
     # Eulerian reference schemes (torChannel-identical)
@@ -648,7 +1028,7 @@ class SLChannelFlow:
         self.apply_bc_uvw()
 
         rhs_u_explicit, rhs_v_explicit, rhs_w_explicit = self.compute_momentum_rhs_explicit_imex()
-        rhs_u_explicit += self.forcing
+        # NOTE: no bulk forcing here -- see _apply_bulk_forcing.
 
         if self.rhs_u_curr is None:
             self.rhs_u_curr = rhs_u_explicit
@@ -693,10 +1073,7 @@ class SLChannelFlow:
                                                   self.dx, self.dy, self.dz_c, self.dz_f, dt_t)
         self.apply_bc_uvw()
 
-        u_bulk_current = compute_bulk_velocity(self.u, self.cell_vol_ratio, self.total_volume)
-        relaxation = 0.1
-        self.forcing += (self.U_bulk - u_bulk_current) / dt * relaxation
-        return u_bulk_current, self.forcing
+        return self._apply_bulk_forcing(dt)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -706,9 +1083,14 @@ class SLChannelFlow:
         import time
 
         if self.advection_scheme == 'sl':
-            step_function = self.step_sl
             interp_name = 'tricubic' if self.sl_order == 4 else 'triquintic'
-            scheme_name = f"Semi-Lagrangian ({interp_name}, {self.sl_time_scheme}) + CN z-diffusion"
+            if self.sl_time_scheme == 'bdf2':
+                step_function = self.step_sl_bdf2
+                scheme_name = (f"Semi-Lagrangian ({interp_name}, bdf2/"
+                               f"{self.sl_bdf2_pressure}) + implicit z-diffusion")
+            else:
+                step_function = self.step_sl
+                scheme_name = f"Semi-Lagrangian ({interp_name}, {self.sl_time_scheme}) + CN z-diffusion"
         elif self.time_scheme == 'IMEX':
             step_function = self.step_imex
             scheme_name = "Eulerian IMEX (AB2 + Implicit z-diffusion)"
@@ -842,7 +1224,15 @@ class SLChannelFlow:
                 if self.turbulence_stats is not None and self.turbulence_stats.n_samples > 0:
                     self.turbulence_stats.save_state(self.stats_state_path)
 
-            if self.n_snapshot > 0 and step % self.n_snapshot == 0:
+            snap_due = self.n_snapshot > 0 and step % self.n_snapshot == 0
+            if self.t_snapshot > 0:
+                if self._next_snap_time is None:
+                    self._next_snap_time = self.initial_time + self.t_snapshot
+                if self.time >= self._next_snap_time - 1e-12:
+                    snap_due = True
+                    while self._next_snap_time <= self.time + 1e-12:
+                        self._next_snap_time += self.t_snapshot
+            if snap_due:
                 u_tau_snap = compute_u_tau(self.u, self.z_c, self.nu, top_wall_bc_type=self.top_wall_bc_type)
                 forcing_snap = forcing.item() if torch.is_tensor(forcing) else forcing
                 snap_name = f'fields_t{self.time:09.3f}.npz'
