@@ -1,0 +1,917 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\newcommand{\ut}{u_\tau}
+\newcommand{\Ret}{\mathrm{Re}_\tau}
+\newcommand{\Reb}{\mathrm{Re}_b}
+\newcommand{\dtp}{\Delta t^{+}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\bU}{\mathbf{U}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\dd}{\mathrm{d}}
+
+\title{Semi-Lagrangian DNS of turbulent channel flow:\\
+what the literature proves, what \texttt{slChannel} does,\\
+and where the gaps are}
+\author{G.~Cavallazzi \and Claude (Anthropic)}
+\date{August 4, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+\texttt{slChannel} replaces the CFL-limited explicit advection of a staggered
+finite-difference channel DNS with unconditionally stable semi-Lagrangian (SL)
+advection, so that $\Delta t$ is set by physical accuracy
+($\dtp \lesssim 0.4$) rather than by $\mathrm{CFL}\approx0.28$. This report
+collects (i) what the semi-Lagrangian Navier--Stokes literature
+\cite{boukir97,xiu01,xu02,xiu05} actually establishes, with the governing
+equations; (ii) what \texttt{slChannel} implements and has measured, including
+results that reproduce --- and in two cases explain --- phenomena the
+literature reported but did not analyse; (iii) the general problems of the
+approach; and (iv) the specific gaps that remain open and that the present
+campaign addresses. The headline: the time-integration skeleton
+(BDF2 along characteristics) has been settled since 1997--2001, and one
+turbulent channel was run with it in 2002 at $\dtp=0.26$
+\cite{xu02}; what has never been published is the \emph{statistics-fidelity
+map} of SL channel DNS --- spectra, $\ut$, and Reynolds stresses as functions
+of $\dtp$ and $\Delta x^{+}$ against reference data --- nor any stability
+theory for the step-decorrelated regime $\dtp\gtrsim0.25$ where the
+wall-clock win actually lives.
+\end{abstract}
+
+\section{Setting and notation}
+
+Incompressible Navier--Stokes in Lagrangian form,
+\begin{equation}
+\frac{\dd\bu}{\dd t} = -\nabla p + \nu\nabla^2\bu + \mathbf{f},
+\qquad \nabla\cdot\bu = 0,
+\qquad
+\frac{\dd\bx}{\dd t} = \bu(\bx,t).
+\label{eq:ns}
+\end{equation}
+A semi-Lagrangian scheme advances the solution on a \emph{fixed} grid by
+tracing, each step, the characteristic arriving at every grid node $\bx_a$
+backwards to its departure point (``foot'') $\bx_d$, and interpolating the old
+field there. Wall units use $\ut$ and $\nu$:
+$\dtp = \Delta t\,\ut^2/\nu$, $\Delta x^{+}=\Delta x\,\ut/\nu$. The
+\texttt{slChannel} operating points are the open channel at
+$\Ret\approx182$ ($256^2\times100$, $\Delta x^{+}=7.7$) and the closed
+KMM \cite{kmm87} channel at $\Reb=2792.8$
+($\Ret=178.12$; $192^2\times256$ with $\Delta x^{+}=11.8$ and
+$256^2\times256$ with $\Delta x^{+}=8.8$). The Eulerian reference scheme
+(identical spatial discretization, AB2/CN IMEX) is capped at
+$\mathrm{CFL}\approx0.28$, i.e.\ $\dtp\approx0.06$; the SL schemes run at
+$\dtp=0.25$--$0.40$.
+
+\section{What the literature proves}
+
+\subsection{The premise: temporal over-resolution of Eulerian DNS}
+
+Xiu \& Karniadakis \cite{xiu01} formalize why explicit advection wastes
+resolution in \emph{time}. With $N\approx \mathrm{Re}^{3/4}$ nodes per
+direction to resolve the Kolmogorov length, an eigenvalue scaling
+$N^{\alpha}$ of the discrete advection operator gives
+\begin{equation}
+\frac{\Delta t_{\mathrm{CFL}}}{\tau_\eta}
+\;\propto\; \mathrm{Re}^{1/2}\,\frac{1}{N^{\alpha}}
+\;\propto\; \mathrm{Re}^{\,1/2-3\alpha/4},
+\label{eq:overresolve}
+\end{equation}
+with $\alpha=1$ (Fourier) to $2$ (Chebyshev). At $\mathrm{Re}=10^4$ the CFL
+step sits one to four orders of magnitude \emph{below} the Kolmogorov time:
+the smallest spatial scales are marginally resolved while the temporal scales
+are over-resolved by orders of magnitude. This is exactly the
+\texttt{slChannel} premise; at our $\Ret=180$ operating point the physics
+limit $\dtp\approx0.3$--$0.4$ (a fraction of the near-wall Kolmogorov time
+$\tau_\eta^{+}\approx 2$--$3$, and of the sweeping-decorrelation time of the
+smallest resolved eddies) sits $5$--$7\times$ above the Eulerian cap.
+
+\subsection{The error structure of interpolated SL advection}
+
+The rigorous convergence analysis of Falcone \& Ferretti \cite{falcone98}
+(anticipated by McDonald and the meteorological literature
+\cite{staniforth91}) gives, for backward integration of order $k$ and
+interpolation of polynomial order $P$,
+\begin{equation}
+\boxed{\;
+\frac{u^{n+1}-u_d^{\,n}}{\Delta t} = \frac{\dd u}{\dd t}
++ \mathcal{O}\!\left(\Delta t^{k}
++ \frac{\Delta x^{P+1}}{\Delta t}\right).
+\;}
+\label{eq:slerror}
+\end{equation}
+Three consequences are proved and repeatedly verified in
+\cite{xiu01,xu02,xiu05}:
+\begin{enumerate}
+\item \textbf{Non-monotonicity in $\Delta t$.} The error \emph{decreases} as
+the step grows while the interpolation term dominates (fewer remaps per unit
+time), reaches a minimum, then grows as $\Delta t^{k}$. Xiu \& Karniadakis
+map this competition explicitly (their Figs.~4--5: at intermediate spatial
+resolution the minimum sits at $\Delta t\approx0.024$ for their cone problem;
+at high resolution pure $\Delta t^2$ growth remains).
+\item \textbf{Small-$\Delta t$ over-dissipation.} The $\Delta x^{P+1}/\Delta t$
+term means an SL run at \emph{small} step accumulates interpolation error at
+rate $1/\Delta t$ --- Boukir et al.'s Remark~7(ii) \cite{boukir97}. SL should
+be run at large $\Delta t$ or not at all.
+\item \textbf{Low-order interpolation is unusable.} SL with linear
+interpolation is algebraically equivalent to first-order upwinding
+(excessively dissipative); cubic is the classical minimum
+\cite{staniforth91}; Giraldo showed that for spectral-element interpolation
+of order $P\ge4$ dispersion and dissipation errors essentially vanish at any
+Courant number \cite{giraldo98}.
+\end{enumerate}
+Stability is subtle: $L^\infty$-stability holds for monotone (low-order)
+interpolation; for order $>2$ on \emph{equidistant} stencils von~Neumann
+analysis shows instabilities can arise unless ``sliding'' stencils centred on
+the departure point are used (what everyone, including \texttt{slChannel},
+does); for nonuniform grids ``$L^2$ stability holds although a rigorous
+theory is incomplete'' \cite{xiu05}. Two further practical constraints from
+\cite{xiu05}: trajectories must not cross,
+\begin{equation}
+\Delta t \;<\; \big\| J_{\bu}^{-1} \big\|,
+\qquad J_{\bu} = \partial \bu/\partial \bx
+\label{eq:crossing}
+\end{equation}
+(in wall units at $\Ret=180$ the near-wall shear gives
+$\Delta t^{+}\lesssim \mathcal{O}(1)$, comfortably satisfied); and boundary
+feet ``may search for points outside the domain due to the large time step''
+--- the proposed remedy in the literature is subcycling grid points near the
+boundary with $\delta t<\Delta t$, acknowledged to complicate the
+implementation.
+
+\subsection{Second-order schemes: the Crank--Nicolson trap and the
+stiffly-stable cure}
+
+This is the core methodological content of \cite{xiu01} and
+\cite{boukir97}, and it maps one-to-one onto the \texttt{slChannel} time
+schemes.
+
+\paragraph{Backward integration.} Both papers trace feet with the explicit
+second-order midpoint rule; writing $\alpha=\bx_a-\bx_d$,
+\begin{equation}
+\alpha = \Delta t\,\bu\!\left(\bx_a - \tfrac{\Delta t}{2}\,
+\bu(\bx_a,t^{n}),\; t^{n+\frac12}\right),
+\label{eq:midpoint}
+\end{equation}
+iterated to convergence (the implicit midpoint variant gives ``almost
+identical results''; the explicit form is preferred for velocity fields known
+only numerically \cite{xiu01}). \texttt{slChannel}'s iterated-midpoint
+departure solver is exactly this.
+
+\paragraph{First order.} Backward-Euler characteristics,
+$(u^{n+1}-u_d^{\,n})/\Delta t = (-\nabla p + \nu\nabla^2 u)^{n+1}$:
+unconditionally stable, robust, first order --- the direct analogue of
+\texttt{slChannel} \texttt{v1}.
+
+\paragraph{The Crank--Nicolson trap.} The obvious second-order scheme,
+\begin{equation}
+\frac{\bu^{n+1}-\bu_d^{\,n}}{\Delta t}
+= -\nabla p^{n+1} + \nu\nabla^2\!\left(\frac{\bu^{n+1}+\bu_d^{\,n}}{2}\right),
+\qquad
+\frac{\dd\bx}{\dd t} = \bu^{n+\frac12} = \tfrac32\bu^{n}-\tfrac12\bu^{n-1},
+\label{eq:cnwrong}
+\end{equation}
+``seems to be second-order in time \dots{} however, our numerical experiments
+show that it is in fact still first-order'' \cite{xiu01}: integrating
+(\ref{eq:ns}) along the characteristic, the midpoint rule requires the
+\emph{whole} right-hand side averaged between the departure point and the
+arrival point,
+\begin{equation}
+\frac{\bu^{n+1}-\bu_d^{\,n}}{\Delta t}
+= \tfrac12\left[\big(-\nabla p + \nu\nabla^2\bu\big)_d^{\,n}
+              + \big(-\nabla p + \nu\nabla^2\bu\big)^{n+1}\right].
+\label{eq:cnright}
+\end{equation}
+Equation~(\ref{eq:cnright}) \emph{is} \texttt{slChannel}'s \texttt{v2}
+(explicit terms and the extrapolated pressure gradient averaged between
+departure and arrival, trajectory-CN diffusion). The paper then reports that
+the three-step splitting of (\ref{eq:cnright}) ``develops a long-term
+instability \dots{} due to the explicit part of the pressure term \dots{} it
+could be treated by additional projections'' --- documented on the Taylor
+vortex at $\mathrm{Re}=10^6$ (their Figs.~9, 16), where the CN-type scheme
+drifts over hundreds of time units while the stiffly-stable scheme tracks the
+Eulerian reference. Independently, \texttt{slChannel} hit the same wall
+twice: the \texttt{pc} trajectory predictor diverged until the predictor was
+\emph{projected} (one extra Poisson solve --- literally the ``additional
+projection''), and the \texttt{v2} incremental-pressure bookkeeping had to
+enter \emph{before} the implicit solve to avoid degenerating to the
+non-incremental scheme.
+
+\paragraph{The stiffly-stable (BDF2) scheme.} Both \cite{boukir97} and
+\cite{xiu01} arrive at the same cure --- replace the neutrally-stable
+trapezoidal combination by a backward-differentiation formula along
+characteristics:
+\begin{equation}
+\boxed{\;
+\frac{\tfrac32\bu^{n+1} - 2\bu_d^{\,n} + \tfrac12\bu_d^{\,n-1}}{\Delta t}
+= \big(-\nabla p + \nu\nabla^2\bu\big)^{n+1},
+\;}
+\label{eq:bdf2}
+\end{equation}
+with \emph{two independent feet}: $\bx_d^{\,n}$ traced over one step
+$\Delta t$ and $\bx_d^{\,n-1}$ traced over two steps $2\Delta t$, both
+starting from the arrival node. Boukir et al.\ freeze one trajectory field
+$U^{*}=2\bu^{n}-\bu^{n-1}$ for both feet and prove (Remark~4(i)) that
+\emph{continuing the far foot from the near foot} (``bending'') drops the
+global order to one --- the feet must be independent solutions of the same
+backward ODE. Xiu \& Karniadakis trace the near foot with the extrapolated
+field $\bu^{n+1/2}=\tfrac32\bu^{n}-\tfrac12\bu^{n-1}$ and the far foot with
+$\bu^{n}$; either choice preserves second order (Taylor analysis). The
+three-step splitting used in \cite{xiu01,xu02},
+\begin{align}
+\frac{\hat\bu - 2\bu_d^{\,n} + \tfrac12\bu_d^{\,n-1}}{\Delta t} &= 0,
+\label{eq:split1}\\
+\frac{\hat{\hat\bu}-\hat\bu}{\Delta t} &= -\nabla p^{n+1},
+\qquad
+\nabla^2 p^{n+1} = \frac{1}{\Delta t}\nabla\cdot\hat\bu,
+\qquad
+\frac{\partial p}{\partial n}
+= -\nu\,\mathbf{n}\cdot\big[\hat\bu/\Delta t\big.
+\big.+ \nabla\times\boldsymbol\omega^{n+1}\big],
+\label{eq:split2}\\
+\frac{\tfrac32\bu^{n+1}-\hat{\hat\bu}}{\Delta t} &= \nu\nabla^2\bu^{n+1},
+\label{eq:split3}
+\end{align}
+is non-incremental in the pressure with the rotational (Karniadakis--Israeli--Orszag
+\cite{kio91}) boundary condition; the implicit solve and projection act with
+the effective step $\Delta t_{\mathrm{eff}} = \tfrac{2}{3}\Delta t$. Boukir
+et al.\ prove stability under a non-restrictive step condition and error
+estimates of the type
+\begin{equation}
+\|\bu-\bu_h\| \;\le\; C\!\left(\Delta t^{2} + h^{m}
++ \frac{h^{m+1}}{\Delta t}\right)
+\label{eq:boukirest}
+\end{equation}
+for degree-$m$ elements --- second order in time, with the same
+interpolation-accumulation term as (\ref{eq:slerror}).
+\texttt{slChannel}'s \texttt{bdf2} scheme is the Boukir variant (frozen
+$U^{*}$, two independent feet, $\Delta t_{\mathrm{eff}}=2\Delta t/3$,
+non-incremental or incremental pressure), verified at self-convergence ratios
+$4.00$ (incremental) and $2.0$ (non-incremental, projection-splitting
+limited).
+
+\subsection{Strong vs.\ auxiliary form; interpolation choices}
+
+Xiu, Sherwin, Dong \& Karniadakis \cite{xiu05} compare the \emph{strong} form
+(backward particle tracking, as above) against the \emph{auxiliary} form ---
+solving the pure advection problem
+\begin{equation}
+\frac{\partial\tilde\phi}{\partial\tau} + \bu\cdot\nabla\tilde\phi = 0,
+\qquad \tilde\phi(\bx,t^{n})=\phi(\bx,t^{n}),
+\qquad \tau\in[t^{n},t^{n+1}]
+\label{eq:oifs}
+\end{equation}
+with an Eulerian substepper at its own CFL limit (the OIFS scheme of Maday,
+Patera \& R{\o}nquist \cite{mpr90}), so that
+$\phi_d^{\,n}=\tilde\phi(\bx_a,t^{n+1})$ without any interpolation. Verdict:
+at intermediate steps the auxiliary form is preferable (no interpolation
+error, standard parallelization), but its cost grows with the number of
+substeps and it is \emph{not} CFL-free; \textbf{at large time steps only the
+strong form is stable and its tracking cost is essentially independent of}
+$\Delta t$. \texttt{slChannel} is a strong-form code; this is the right
+branch for $\dtp\gtrsim0.25$.
+
+For the channel geometry specifically (\cite{xiu05}, \S3.3: Fourier
+$\times$ Fourier $\times$ spectral-element, i.e.\ structurally our grid),
+they reject global Fourier interpolation as ``very high'' cost and use
+\emph{local} interpolation in the homogeneous directions --- exactly the
+tensor-product-stencil choice of \texttt{slChannel} --- comparing Lagrange
+stencils of orders 3--7 against \emph{cubic Hermite} with the nodal
+derivatives computed spectrally (FFT differentiation):
+third-order Hermite matches seventh-order Lagrange accuracy at about half
+the cost, and retains exponential convergence where fixed-order Lagrange
+saturates. This is the closest published relative of \texttt{slChannel}'s
+prefiltered-spline \texttt{field\_interp} path (C$^2$ B-spline in $x,y$ via
+FFT symbol division $+$ Hermite evaluation in $z$).
+
+\subsection{The one turbulence result: Xu, Xiu \& Karniadakis (2002)}
+
+Reference \cite{xu02} is the only published SL turbulent channel DNS in this
+line, and its parameters land startlingly close to ours:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & Xu et al.\ 2002 \cite{xu02} & \texttt{slChannel} (2026) \\
+\midrule
+Scheme & BDF2 characteristics, Eqs.~(\ref{eq:bdf2})--(\ref{eq:split3})
+       & same skeleton (\texttt{bdf2}, Boukir feet) \\
+Discretization & Fourier$\times$SE(Jacobi)$\times$Fourier, $48^3$
+               & FD2 staggered, $192^2$--$768^2\times100$--$256$ \\
+Interpolation & \emph{global} modal (all Fourier modes)
+              & local tricubic/triquintic, Triton \\
+$\Ret$ & 116 & 178--182 (exact KMM $\Reb$) \\
+$\dtp$ & $0.2645$ ($10\times$ Eulerian $\Delta t$)
+       & $0.25$--$0.40$ ($4$--$7\times$) \\
+Statistics window & $T=20$ convective units
+                  & 70 washouts ($\approx 880$ c.u., $10^4\,t^{+}$) \\
+Validation & Eulerian twin only, mean $+$ rms
+           & Eulerian twin $+$ KMM/MKM data, \\
+ & & profiles, stresses, spectra \\
+Cost & $10\times$/step $\Rightarrow$ net $1.0\times$
+     & $1.3$--$2.1\times$/step $\Rightarrow$ net $2$--$3.2\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Their findings: (i) the SL run is \emph{stable at marginal resolution without
+de-aliasing} where the Eulerian twin is unstable at any $\Delta t$ ---
+interpolation supplies the missing high-$k$ dissipation; (ii) mean velocity
+indistinguishable from the Eulerian reference ``despite the very large time
+step''; (iii) \emph{rms intensities differ, most visibly an elevated
+streamwise peak}, which they attribute to time-averaging error by comparing
+$T=5$ vs $T=20$ Eulerian averages; (iv) the global interpolation made the
+method $10\times$ slower per step, cancelling the $10\times$ step gain ---
+they close by calling for ``better local interpolation procedures'' and
+report no follow-up channel study. Two details deserve emphasis. First,
+their $\dtp=0.2645$ sits \emph{just below} the two-foot stability boundary
+$\dtp\approx0.30$ that \texttt{slChannel} mapped in 2026 --- they were one
+courageous step-doubling away from a mysterious blow-up. Second, their
+elevated streamwise rms is the same signature \texttt{slChannel} measures
+with $44\times$ longer averaging ($+5.6\%$ peak $u'^{+}_{\mathrm{rms}}$ at
+$\Delta x^{+}=11.8$); with converged statistics it is demonstrably \emph{not}
+an averaging artifact.
+
+\section{What \texttt{slChannel} does}
+
+\subsection{Scheme summary}
+
+Staggered MAC finite differences ($x,y$ uniform periodic, $z$
+tanh-stretched), \texttt{torch.float64} infrastructure with fp32-accumulate
+Triton gather kernels for the interpolation. Feet by iterated midpoint
+(\ref{eq:midpoint}) with trilinear or trilinear$\to$tricubic trajectory
+sampling; fields remapped by tensor-product Lagrange stencils (tricubic
+$P{=}3$ / triquintic $P{=}5$; nonuniform-node weights in $z$ against the
+actual grid, analytic inverse tanh map for stencil location) or by the C$^2$
+prefiltered spline path. Time schemes:
+\begin{itemize}
+\item \texttt{v1}: backward-Euler-class splitting, $\mathcal O(\Delta t)$,
+robust (the literature's first-order scheme);
+\item \texttt{v2}: the true departure-averaged CN (\ref{eq:cnright}) with
+incremental pressure and trajectory-CN diffusion,
+$\mathcal O(\Delta t^2)$ (self-convergence ratio $3.93$);
+\item \texttt{bdf2}: Boukir BDF2 (\ref{eq:bdf2}), frozen
+$U^{*}=2\bu^{n}-\bu^{n-1}$, two independent feet at $\Delta t$ and
+$2\Delta t$, update $\hat u = (4\bar u - \bar{\bar u})/3$, $\theta{=}1$
+$z$-solve and FFT projection at $\Delta t_{\mathrm{eff}}=2\Delta t/3$,
+\texttt{noninc}/\texttt{inc} pressure (ratios $2.0$ / $4.00$).
+\end{itemize}
+Trajectory velocity options \texttt{ab2} (extrapolation, the literature
+default), \texttt{none} (diagnostic), and \texttt{pc}
+(predictor--corrector, predictor \emph{projected} --- the ``additional
+projection'' of \cite{xiu01}, self-convergence $3.78$). Mass flux is imposed
+exactly by a uniform divergence-free shift (CaNS convention); Reynolds
+stresses are accumulated about the \emph{time} mean at each component's own
+staggered nodes.
+
+\subsection{One step in full: the discrete equations}
+\label{sec:algorithm}
+
+This subsection writes out every substep as implemented in
+\texttt{solver.py}/\texttt{semilag.py}, in execution order. Notation:
+$V^{n}=(u,v,w)^{n}$ is the staggered MAC velocity ($u$ at $x$-faces, $v$ at
+$y$-faces, $w$ at $z$-faces, one ghost layer per side; pressure at cell
+centres); $G_h$ and $D_h$ are the staggered gradient and divergence;
+$L_{xy}$ and $L_z$ the horizontal and wall-normal discrete Laplacians
+(second-order central, $L_z$ on the stretched metric); $\mathcal A[\phi](\bx_d)$
+denotes the interpolation of a field $\phi$ at the departure points of the
+component grid on which $\phi$ lives. All ghost layers are rebuilt
+(\emph{BC application}) after every operation that leaves them stale.
+
+\paragraph{(1) Trajectory velocity.} A single advecting field
+$\bU^{*}$, defined per scheme:
+\begin{equation}
+\bU^{*} =
+\begin{cases}
+\tfrac32 V^{n}-\tfrac12 V^{n-1} & \text{\texttt{v1}/\texttt{v2}, \texttt{ab2}
+(target $t^{n+1/2}$)},\\[2pt]
+V^{n} & \text{\texttt{traj\_extrapolation: none} (diagnostic, $\mathcal O(\Delta t)$)},\\[2pt]
+\tfrac12\big(V^{n}+\tilde V^{n+1}\big) & \text{\texttt{pc} (projected predictor
+$\tilde V^{n+1}$, see below)},\\[2pt]
+2V^{n}-V^{n-1} & \text{\texttt{bdf2} (frozen for \emph{both} feet, target $t^{n+1}$)}.
+\end{cases}
+\label{eq:ustar}
+\end{equation}
+For \texttt{pc}, the predictor is a complete first-order step (SL advection of
+$V^{n}$ by itself, plus the horizontal viscous tendency, plus the
+\emph{lagged} pressure gradient $-G_h p^{n-1/2}$, then a backward-Euler
+$z$-solve) which is then \emph{projected} --- one extra Poisson solve. The
+projection is not optional: an unprojected predictor carries an
+$\mathcal O(\Delta t)$ divergence, SL trajectories through a divergent
+mid-velocity are compressive, and the scheme blows up
+($\ut$ $+127\%$, \S\ref{sec:repro}).
+
+\paragraph{(2) Departure points: iterated midpoint.} For every arrival node
+$\bx_a$ of each component grid, with $K=2$ iterations
+(\texttt{n\_traj\_iters}):
+\begin{equation}
+\bx_m^{(0)}=\bx_a,\qquad
+\bx_m^{(s)} = \bx_a - \frac{\Delta t}{2}\,\bU^{*}\!\big(\bx_m^{(s-1)}\big),
+\quad s=1,\dots,K,\qquad
+\bx_d = 2\bx_m^{(K)}-\bx_a,
+\label{eq:feet}
+\end{equation}
+i.e.\ $\bx_d = \bx_a - \Delta t\,\bU^{*}(\bx_m^{(K)})$: the explicit iterated
+midpoint rule (\ref{eq:midpoint}). $\bU^{*}$ is sampled at the (staggered)
+midpoints by trilinear interpolation on the fast path
+(\texttt{traj\_order:~2}; its $C^{0}$ interpolant caps \emph{self}-convergence
+at fixed grid at $\mathcal O(\Delta t)$ with a small $h^{2}$ coefficient ---
+tricubic sampling, \texttt{traj\_order:~4}, restores clean
+$\mathcal O(\Delta t^{2})$, ratio $3.93$). $x,y$ are unwrapped modulo the
+period; $z$ is clamped to the wall-adjacent node range and every clamp is
+counted (\texttt{clamped} diagnostic; measured $0$ over $10^{4}\,t^{+}$ in
+the closed channel). For \texttt{bdf2} the same $\bU^{*}$ traces \emph{two
+independent} feet from the same arrival node, (\ref{eq:feet}) with
+$\Delta t$ and with $2\Delta t$ --- never the far foot continued from the
+near one (Boukir Remark~4(i)).
+
+\paragraph{(3) Remap.} The old field is evaluated at the feet by a
+tensor-product Lagrange stencil of $P{+}1$ nodes per direction
+($P=3$ tricubic, $P=5$ triquintic):
+\begin{equation}
+\mathcal A[\phi](\bx_d)
+= \sum_{i,j,k} w^{x}_{i}(x_d)\, w^{y}_{j}(y_d)\, w^{z}_{k}(z_d)\;
+\phi^{n}_{i j k},
+\qquad
+w_{i}(\xi)=\prod_{m\ne i}\frac{\xi-\xi_m}{\xi_i-\xi_m}.
+\label{eq:remap}
+\end{equation}
+In $x,y$ the nodes are uniform and the weights close-form; in $z$ the weights
+are built \emph{against the actual stretched nodes} $z_c$/$z_f$ (uniform-$\xi$
+weights on the tanh image would silently lose an order: $z_c$ are face
+midpoints, not the tanh-map image), the stencil is located by the analytic
+inverse tanh map plus one node compare (no search), sliding stencils centred
+on the foot in the interior, one-sided at the walls. The index/weight set of
+(\ref{eq:remap}) is computed once per component and step and reused for every
+field remapped on that grid --- this is what makes the \texttt{v2}
+departure-evaluated right-hand sides in (\ref{eq:v2star}) nearly free. The
+alternative $C^{2}$ path (\texttt{field\_interp: spline}) replaces
+(\ref{eq:remap}) by a prefiltered cubic B-spline in $x,y$ (FFT symbol
+division) and a nonuniform $C^{2}$ cubic spline in $z$ with Hermite
+evaluation.
+
+\paragraph{(4) Explicit horizontal tendency.} On $V^{n}$,
+$R_{xy}=\nu L_{xy}V^{n}$ (no body force here --- the flux constraint is
+substep 8). \texttt{v2} time-centres it by AB2,
+$R_{xy}^{\,n+1/2}=\tfrac32 R_{xy}^{\,n}-\tfrac12 R_{xy}^{\,n-1}$; \texttt{bdf2}
+extrapolates to $t^{n+1}$, $R_h=2R_{xy}^{\,n}-R_{xy}^{\,n-1}$
+(\texttt{bdf2\_xy\_rhs: extrap}; \texttt{lagged} uses $R_{xy}^{\,n}$).
+
+\paragraph{(5) Advected predictor.} Per scheme:
+\begin{align}
+\texttt{v1:}\quad & u^{*} = \mathcal A[V^{n}](\bx_d) + \Delta t\,R_{xy},
+\label{eq:v1star}\\[4pt]
+\texttt{v2:}\quad & u^{*} = \mathcal A[V^{n}](\bx_d)
++ \Delta t\Big[\tfrac12\big(\mathcal R_d + \mathcal R_a\big)
++ \tfrac12 \big(\nu L_z V^{n}\big)_d\Big],
+\qquad
+\mathcal R = R_{xy}^{\,n+1/2} - G_h\, p_{\mathrm{ext}},
+\label{eq:v2star}\\[4pt]
+\texttt{bdf2:}\quad & u^{*} =
+\tfrac43\,\mathcal A[V^{n}](\bx_d^{\,\Delta t})
+- \tfrac13\,\mathcal A[V^{n-1}](\bx_d^{\,2\Delta t})
++ \Delta t_{\mathrm{eff}}\big[R_h - G_h\,p_{\mathrm{ext}}\big],
+\qquad
+\Delta t_{\mathrm{eff}}=\tfrac{2}{3}\Delta t.
+\label{eq:bdfstar}
+\end{align}
+In (\ref{eq:v2star}) subscripts $d/a$ mean the field evaluated at the
+departure point (via the reused stencil of substep 3, with BC-consistent
+ghosts so near-wall feet interpolate meaningful values) and at the arrival
+node: the \emph{entire} explicit right-hand side, including the extrapolated
+pressure gradient $p_{\mathrm{ext}}=2p^{n-1/2}-p^{n-3/2}$, is averaged along
+the characteristic --- this is exactly what distinguishes the true
+second-order scheme (\ref{eq:cnright}) from the first-order trap
+(\ref{eq:cnwrong}). The $z$-viscous term enters with its departure half only;
+its arrival half is the implicit solve below. In (\ref{eq:bdfstar}),
+$p_{\mathrm{ext}}=2p^{n}-p^{n-1}$ (full levels) for
+\texttt{bdf2\_pressure: inc} and is omitted for \texttt{noninc}; dividing
+Boukir's update (\ref{eq:bdf2}) by the BDF2 leading coefficient $\tfrac32$ is
+what produces the $\tfrac43/\tfrac13$ foot weights and the effective step
+$\Delta t_{\mathrm{eff}}$ carried by every subsequent substep. The pressure
+term must enter \emph{here}, before the implicit solve: adding it after is
+algebraically identical to the non-incremental scheme (verified analytically
+and numerically).
+
+\paragraph{(6) Implicit wall-normal diffusion.} One tridiagonal solve per
+horizontal position and component ($\theta$-scheme on the stretched metric,
+no-slip rows at the walls):
+\begin{equation}
+\big(I - \theta\,\delta t\,\nu L_z\big)\,u^{**}
+= u^{*} + (1-\theta)\,\delta t\,\nu L_z u^{*},
+\qquad
+(\theta,\delta t)=
+\begin{cases}
+(\tfrac12,\ \Delta t) & \texttt{v1 (CN at arrival)},\\
+(1,\ \tfrac{\Delta t}{2}) & \texttt{v2 (arrival half of trajectory-CN)},\\
+(1,\ \Delta t_{\mathrm{eff}}) & \texttt{bdf2}.
+\end{cases}
+\label{eq:zsolve}
+\end{equation}
+
+\paragraph{(7) Projection.} With $\delta t=\Delta t$
+(\texttt{v1}/\texttt{v2}) or $\Delta t_{\mathrm{eff}}$ (\texttt{bdf2}),
+\begin{equation}
+L_h\,\phi = \frac{D_h\,\bu^{**}}{\delta t},
+\qquad
+\bu^{n+1} = \bu^{**} - \delta t\,G_h\,\phi,
+\qquad
+p^{\mathrm{new}} =
+\begin{cases}
+\phi & \texttt{v1}, \texttt{bdf2-noninc},\\
+p_{\mathrm{ext}}+\phi & \texttt{v2}, \texttt{bdf2-inc}.
+\end{cases}
+\label{eq:proj}
+\end{equation}
+The Poisson solve diagonalizes $x,y$ by real FFTs with the second-order
+modified wavenumbers $\tilde k^{2}=2(1-\cos k\Delta)/\Delta^{2}$, leaving one
+tridiagonal system in $z$ per mode pair $(k_x,k_y)$ with homogeneous Neumann
+ends (built into the staggered stencil --- no explicit pressure BC, hence no
+rotational-BC machinery of (\ref{eq:split2}) is needed); the singular
+Neumann--Neumann $(0,0)$ mode is pinned. On the incremental branches the
+splitting error of (\ref{eq:proj}) is $\mathcal O(\Delta t^{2})$
+(self-convergence ratios $3.93$/$4.00$); the non-incremental branch is
+first-order in the projection but robust (ratio $2.0$).
+
+\paragraph{(8) Exact bulk-flux constraint.} Last, the CaNS-convention mass
+flux enforcement:
+\begin{equation}
+c = U_b - \langle u^{n+1}\rangle_V,
+\qquad
+u^{n+1} \mathrel{+}= c \ \ \text{(uniformly)},
+\qquad
+f = c/\Delta t,
+\label{eq:flux}
+\end{equation}
+where $\langle\cdot\rangle_V$ is the volume average. A uniform shift is
+divergence-free, so it commutes with the projection just performed; the
+driving force $f$ is \emph{diagnosed} from the correction rather than steered
+towards it. This replaces an integral controller whose error dynamics were an
+undamped oscillator with $1/\Delta t$ gain --- under which any $\Delta t$
+sweep partly measured the controller instead of the scheme.
+
+\paragraph{Bootstrapping.} \texttt{bdf2} assumes constant $\Delta t$ (the
+$2\Delta t$ foot and the $\tfrac43/\tfrac13$ weights); on the first step,
+after a restart, or on any $\Delta t$ change the step degenerates to one BDF1
+step (backward-Euler characteristics: $\bU^{*}=V^{n}$, single foot,
+$\theta=1$ at full $\Delta t$) which seeds the $V^{n-1}$ and $R_{xy}^{\,n-1}$
+histories --- one $\mathcal O(\Delta t^{2})$ local error, the same policy as
+the documented AB2 restart re-bootstrap. \texttt{bdf2} configs pin
+$\Delta t$ (\texttt{dt\_update\_interval:~0}).
+
+\subsection{Reproductions of literature phenomena}
+\label{sec:repro}
+
+\begin{enumerate}
+\item \textbf{The CN long-term fragility} (\cite{xiu01}, their Figs.~9/16):
+observed as the \texttt{pc}-without-projection blow-up
+($\ut$ $+127\%$) and cured exactly as the paper suggests, by one extra
+projection per step.
+\item \textbf{Non-monotonic error / the ``sweet spot''}
+(Eq.~\ref{eq:slerror}): the M3 campaign finds statistics \emph{degrade} both
+above $\dtp\approx0.22$ (floor, below) and, in over-dissipation terms, at
+small $\dtp$ --- SL at the Eulerian $\Delta t$ is strictly worse than
+Eulerian, consistent with Remark~7(ii) of \cite{boukir97}.
+\item \textbf{BDF2 damping vs.\ CN neutrality}: \texttt{bdf2} removes the
+\texttt{v2} trajectory-CN's neutral high-$k$ remap behaviour, as the
+stiffly-stable construction intends \cite{xiu01,boukir97}.
+\item \textbf{Second-order convergence} of all three second-order variants
+verified by Richardson self-convergence with frozen forcing, matching the
+Taylor-analysis claims of both papers.
+\end{enumerate}
+
+\subsection{Results beyond the literature}
+
+\paragraph{(a) The high-$k$ spectral floor and its mechanism.} For
+$\dtp > \dtp_{*}\approx0.22$ (streamwise $\mathrm{CFL}\approx0.65$, the
+sweeping-decorrelation time of the highest resolved modes), the streamwise
+spectrum at $z^{+}\approx15$ develops a tail floor $20$--$100\times$ above
+the Eulerian reference. The mechanism is \emph{not} interpolation error:
+quintic interpolation, C$^2$ splines, and fourth-order trajectory sampling
+all \emph{raise} the floor (interpolation error is the floor's
+\emph{dissipation}); the injection is the AB2 \emph{trajectory-velocity
+extrapolation} $\tfrac32\bu^{n}-\tfrac12\bu^{n-1}$, which amplifies content
+that decorrelates within one step. Setting the extrapolation off kills the
+floor at the cost of first-order trajectories. Nothing in
+\cite{boukir97,xiu01,xu02,xiu05} anticipates this: their analyses assume
+smooth fields with bounded Lagrangian derivatives, an assumption turbulence
+at $\dtp\gtrsim0.2$ violates by construction.
+
+\paragraph{(b) The stochastic two-foot instability.} Model the highest
+resolved modes as phase-decorrelated between steps (random departure-phase
+noise). A multistep SL update $\sum_i a_i \bar u_i$ built from independently
+traced feet then has per-step tail-energy gain $\sum_i a_i^2$, because
+decorrelated phases add in energy, not amplitude. For the BDF2 combination
+$\hat u = \tfrac43\bar u - \tfrac13\bar{\bar u}$,
+\begin{equation}
+\boxed{\;
+G_{\mathrm{BDF2}} = \left(\tfrac43\right)^{2}+\left(\tfrac13\right)^{2}
+= \tfrac{17}{9}\approx 1.89,
+\qquad
+G_{\mathrm{single\;foot}} = 1.
+\;}
+\label{eq:gain}
+\end{equation}
+When $G$ exceeds the per-step viscous-plus-interpolation damping of the tail,
+the floor stops being a floor and becomes a monotonic runaway. A 1-D SL model
+(cubic remap, AR(1) velocity decorrelation) predicts the bifurcation; the GPU
+campaign confirms it: \texttt{bdf2} is clean at $\dtp=0.25$ and blows up
+monotonically at $\dtp\ge0.30$, while single-foot schemes (gain $1$) have
+bounded floors at all tested $\dtp\le0.4$. This is, to our knowledge, a novel
+result --- it implies second-order multistep characteristics schemes carry an
+\emph{intrinsic} large-$\dtp$ stability tax that no deterministic truncation
+analysis reveals, and it explains why \cite{xu02} at $\dtp=0.2645$ saw
+nothing.
+
+\paragraph{(c) Converged statistics against reference data.} 70-washout
+closed-channel runs at the exact KMM $\Reb=2792.8$: at
+$\Delta x^{+}=11.8$ the SL \texttt{bdf2} scheme delivers
+$\Ret = 173.9$ vs.\ MKM's $178.12$ ($-2.4\%$), where the Eulerian twin
+on the \emph{same grid} gives $+0.9\%$ --- i.e.\ the SL interpolation itself
+costs $\approx3\%$ in $\ut$ at this resolution (only $\approx1\%$ at
+$\Delta x^{+}=7.7$ in the open channel), alongside a $+5.6\%$ elevated
+streamwise-rms peak and a low $w'$ buffer layer. This is the quantitative
+version of what \cite{xu02} glimpsed and set aside. The
+resolution-dependence hypothesis has since been confirmed: the same scheme at
+$256^2\times256$ ($\Delta x^{+}=8.8$, identical $z$-grid, 70 washouts)
+recovers $\Ret=176.4$ ($-1.0\%$) and reduces the streamwise-rms excess to
+$+3.4\%$ --- the deficit is a wall-parallel-resolution effect of the
+interpolation dissipation, not a systematic bias of the time scheme, and the
+$z$-grid ($\Delta z^{+}=0.36$ at the wall, $2.4$ at the centreline) is not
+implicated.
+
+\paragraph{(d) Wall-clock accounting on modern hardware.} With
+register-resident Triton gather kernels the full three-component tricubic
+advect costs $126$\,ms at $768^2\times180$ (fp32-accumulate-64); the SL step
+is $1.3$--$2.1\times$ the Eulerian step cost, and at the physics-limited
+$\dtp$ the net gain is $2$--$3.2\times$ per simulated time unit --- where
+\cite{xu02} reported net $1.0\times$ (global interpolation) and
+\cite{xiu01} $4\times$ on laminar spectral-element cases. The remaining cost
+is shared fp64 infrastructure (FFT-Poisson, implicit $z$-diffusion), not the
+SL machinery.
+
+\section{The problems, in general}
+
+\begin{enumerate}
+\item \textbf{Interpolation dissipation is the effective subgrid model.}
+Equation (\ref{eq:slerror})'s $\Delta x^{P+1}/\Delta t$ term is not a small
+perturbation in DNS: it is a scale-selective dissipation concentrated exactly
+where the near-wall cycle lives, and it biases $\ut$ and the rms profiles.
+The literature proves the error term; it never measured its effect on
+turbulence statistics. Every ``better interpolant'' trades floor height
+against dissipation --- it cannot fix both, because the injection (item 2) is
+a different mechanism.
+\item \textbf{Extrapolated trajectories amplify step-decorrelated content.}
+Both the bounded AB2 floor and the two-foot runaway (\ref{eq:gain}) are
+stochastic phenomena of the $\dtp\gtrsim0.2$ regime. All published SL-NS
+stability theory is deterministic and smooth; it is silent here.
+\item \textbf{Pressure/projection splitting trades order against
+robustness.} The exactly-second-order routes (incremental pressure,
+departure-averaged CN) are precisely the fragile ones
+(\cite{xiu01}'s long-term instability; our \texttt{pc} history); the robust
+non-incremental BDF2 caps the velocity self-convergence near first order in
+the projection. This tension is intrinsic, not an implementation artifact.
+\item \textbf{Boundary feet and symmetry planes.} Feet leaving the domain
+are rare in a channel ($w\to0$ at walls; measured \texttt{clamped}${}=0$
+over $10^4\,t^{+}$), but the \emph{interpolation stencil} near a boundary is
+one-sided and symmetry-blind: at a free-surface/symmetry plane the correct
+extension is a mirror ($u,v$ even, $w$ odd), and clamping/one-sided stencils
+get $w$ wrong at first order. This corrupted the open-channel near-surface
+$v,w$ statistics and motivated the closed-channel pivot; the literature's
+only remedy (near-boundary subcycling \cite{xiu05,falcone98}) has never been
+tested in turbulence.
+\item \textbf{No discrete conservation.} Advective-form SL conserves neither
+momentum nor energy; \texttt{slChannel} pins the bulk flux exactly (first
+moment) but second moments drift at the interpolation-dissipation level.
+None of \cite{boukir97,xiu01,xu02,xiu05} addresses conservation at all.
+\item \textbf{Cost is decided by the interpolation implementation.} The
+2002 result died on a $10\times$ interpolation bill. The GPU changes the
+economics --- gathers and fp32 tensor arithmetic are cheap, bandwidth-bound
+fp64 stencils are not --- but only with kernels designed for it.
+\end{enumerate}
+
+\section{Where the gaps are}
+
+\begin{enumerate}
+\item \textbf{The statistics-fidelity map (being filled by this campaign).}
+No published work reports spectra, $\ut$, and Reynolds-stress budgets of an
+SL channel DNS against reference data as functions of $\dtp$ and
+$\Delta x^{+}$. The M3 sweep ($\dtp$ axis), the KMM comparison
+($\Delta x^{+}=11.8$), and the running tc256 case ($\Delta x^{+}=8.8$)
+constitute exactly this map. Publishable as-is once tc256 lands.
+\item \textbf{Stochastic stability theory for characteristics schemes.} The
+$\ell^2$-gain argument (\ref{eq:gain}) generalizes: any multistep foot
+combination has gain $\sum a_i^2 \ge 1$ with equality only for single-foot
+schemes; a $\theta$-blended single-foot scheme with BDF2-like damping but
+$G\le1$ would push the boundary past $\dtp=0.3$. Design space untouched in
+the literature.
+\item \textbf{Interpolation as a quantified LES model.} $\ut(\Delta
+x^{+}, P, \text{scheme})$ --- the $-3\%$ vs $-1\%$ resolution branch is in
+progress; the order branch (quintic at $\Delta x^{+}=11.8$) and the
+Hermite-with-spectral-derivatives variant of \cite{xiu05} (never tried on a
+staggered FD grid; our C$^2$ spline is its cousin) are cheap follow-ups.
+\item \textbf{Symmetry-consistent boundary treatment.} Mirror extension of
+the stencils at a free-slip plane ($u,v$ even, $w$ odd) vs.\ the current
+clamping; would reopen the cheaper half-channel configuration with clean
+near-surface statistics.
+\item \textbf{Conservative SL for wall turbulence.} Flux-form/remap SL
+(SLICE-class) has never met a wall-bounded DNS; it would remove the
+second-moment drift at its root.
+\item \textbf{Higher $\Ret$ and the economics at scale.} The premise
+(\ref{eq:overresolve}) strengthens with $\mathrm{Re}$; the Re550 A/B
+benchmark ($768^2\times180$) is staged in the repository, and the
+infrastructure (PCR Poisson, fused $z$-Laplacian) is where the remaining
+wall-clock lives.
+\end{enumerate}
+
+\section{Parallelisation}
+\label{sec:parallel}
+
+\texttt{slChannel} is a single-GPU code today; this section separates what
+already parallelises (and how) from what a multi-GPU version would have to
+solve. The short version: the SL machinery is embarrassingly parallel within
+a device, and across devices it needs \emph{wider but still static,
+neighbour-only} halo exchanges --- the genuinely non-trivial communication of
+the step is the FFT Poisson solve, which SL inherits unchanged from any
+pencil-decomposed channel code.
+
+\subsection{Within one device}
+
+Every substep of \S\ref{sec:algorithm} is data-parallel over grid points with
+no global iteration: (1)--(2) are pointwise linear combinations and
+short gather chains; (3) is a tensor-product gather --- for each arrival node,
+$3(P{+}1)$ one-dimensional weights and a $(P{+}1)^{3}$-point read; (6) is a
+batch of $n_x n_y$ \emph{independent} tridiagonal systems per component
+($65{,}536$ at $256^{2}$ --- far more parallelism than the GPU needs); (7) is
+a pair of 2-D FFTs plus another independent tridiagonal batch; (8) is a
+reduction and a broadcast. Two facts make the gather fast in practice. First,
+the departure map is a smooth deformation of the grid: neighbouring arrival
+nodes have neighbouring feet, so the loads are near-coalesced and cache
+behaviour is Eulerian-like, not scatter-like. Second, the weight tensors
+never need to exist in memory: the hand-written Triton kernels keep the
+$3(P{+}1)$ weights per point in registers and fuse trajectory iteration,
+stencil location and gather into one pass ($126$/$143$\,ms tricubic/quintic
+for all three components at $768^{2}\times180$), where a graph compiler that
+materializes $(N,P{+}1)$ weight tensors pays $\sim$10\,GB of traffic for the
+same arithmetic. Precision follows the hardware: flop-dense interpolation in
+fp32 with fp64 accumulation, bandwidth-bound stencils and the whole pressure
+path in fp64.
+
+\subsection{Decomposition choice}
+
+The channel fixes the decomposition almost by itself. The $z$ direction is
+non-periodic, stretched, carries the implicit solves (full-column
+tridiagonals) and the wall boundary conditions --- so $z$ stays on-device:
+decompose in $x$ and/or $y$ (``$z$-pencils''). Then substeps (1), (2), (4),
+(5), (6), (8) are local up to standard halo exchanges in $x,y$; the walls are
+never split. The Poisson solve needs full $x$-lines, then full $y$-lines,
+then full $z$-columns: the standard transpose cycle
+($z$-pencils $\to$ $x$-pencils $\to$ $y$-pencils $\to$ $z$-pencils) of every
+2DECOMP-class channel code (CaNS included). SL adds nothing to it --- the
+projection operates on fields at arrival nodes and never sees a departure
+point.
+
+\subsection{The SL-specific part: wide, anisotropic, static halos}
+
+What SL changes is the \emph{width} of the neighbour exchange. An Eulerian
+second-order stencil needs a one-cell halo. An SL foot lies up to
+$\mathrm{CFL}^{\max}_{x}$ cells upstream, and the interpolation stencil
+extends $\lceil P/2\rceil$ nodes beyond it; the trajectory iterations sample
+$\bU^{*}$ at midpoints inside the same envelope. Per direction,
+\begin{equation}
+h \;=\; m\,\big\lceil \mathrm{CFL}^{\max} \big\rceil + \lceil P/2 \rceil,
+\qquad
+m = \begin{cases} 1 & \text{single foot (\texttt{v1}, \texttt{v2}, \texttt{pc})},\\
+2 & \text{far foot of \texttt{bdf2} (depth } 2\Delta t).\end{cases}
+\label{eq:halo}
+\end{equation}
+At the production operating point (trajectory $\mathrm{CFL}\approx3$,
+measured $\max\mathrm{CFL}\approx2.7$ at $\dtp=0.25$): tricubic \texttt{v2}
+needs $h=5$; quintic \texttt{bdf2} needs $h=2\cdot3+3=9$ in $x$. Three
+properties keep this benign. First, the halo is \emph{static and known at
+step start}: one cheap global $\max|\bu|$ bounds every foot, so the exchange
+is a regular neighbour transfer of fixed width --- no dynamic, data-dependent
+communication, no owner-lookup of feet, in contrast to SL on unstructured
+meshes where foot location is itself a parallel search problem
+(the NWP literature's on-demand thin-halo machinery \cite{staniforth91} is
+overkill here). Second, it is \emph{anisotropic in the right way}: the mean
+flow sweeps in $+x$, so feet lie predominantly upstream in $x$
+($\mathrm{CFL}_y$ and $\mathrm{CFL}_z$ are several times smaller), and the
+wide halo is needed on one axis, mostly one side. Third, the exchange
+serves \emph{all} gathers of the step: \texttt{bdf2} needs halos of three
+fields ($V^{n}$, $V^{n-1}$, $\bU^{*}$ --- and $\bU^{*}$ is a local linear
+combination of the first two, so effectively two), and \texttt{v2}'s
+departure-evaluated right-hand sides ride the same stencils.
+
+The volume arithmetic works out. At $h=9$ on a $256^{2}$-per-GPU $z$-pencil
+the halo is $\sim7\%$ of the subdomain per exchanged field --- and the SL
+step runs at $4$--$7\times$ the Eulerian $\Delta t$, so per simulated time
+unit the SL scheme moves a halo volume \emph{comparable} to the Eulerian
+twin's thin-but-frequent exchanges. The hard scaling limit is geometric:
+strong scaling stops being useful when the local extent approaches
+$\sim2h$ ($\approx20$ cells at quintic \texttt{bdf2}), which for the KMM box
+means $\mathcal O(100)$ GPUs before the SL gathers even notice ---
+the transpose all-to-all of the Poisson solve will saturate long before
+that, exactly as in Eulerian pencil codes.
+
+\subsection{Overlap and ordering}
+
+The step order of \S\ref{sec:algorithm} is overlap-friendly: $\bU^{*}$ is
+formed first (substep 1) and its halo posted asynchronously; departure points
+and remap of the \emph{interior} (feet whose stencils stay on-device ---
+the bulk, since $h\ll n_{\mathrm{local}}$) proceed while boundary-zone halos
+are in flight; the boundary-zone gathers run last. The tridiagonal batches
+need no communication at all in $z$-pencils. The reductions of substep (8)
+and the $\max|\bu|$ bound are single all-reduce scalars. None of this is
+implemented --- but none of it is novel either: it is the standard structured
+halo-overlap pattern, with (\ref{eq:halo}) as the only SL-specific input.
+The honest summary: parallelising SL channel DNS is \emph{not} the hard part
+of this method; the two-foot stability boundary (\ref{eq:gain}) and the
+interpolation-dissipation bias are.
+
+\section{Verdict}
+
+Boukir et al.\ supply the theorem-backed time skeleton; Xiu \& Karniadakis
+supply the splitting that survives long integrations, the error structure,
+and the warning about Crank--Nicolson; Xu et al.\ prove an SL turbulent
+channel runs stably at $\dtp\approx0.26$ and leave its statistics
+unexamined; Xiu et al.\ 2005 settle strong-vs-auxiliary in favour of the
+strong form at large steps and sketch the local-interpolation path our code
+takes. Everything downstream of that --- the spectral floor and its
+extrapolation mechanism, the $17/9$ two-foot bifurcation, the
+interpolation-dissipation cost in $\ut$ measured against MKM with converged
+statistics, and the GPU cost model that finally makes the method a net win
+--- is not in the literature. Those are the contributions; with the tc256
+run landed ($\Ret=176.4$, $-1.0\%$ at $\Delta x^{+}=8.8$), the resolution
+branch of the fidelity map is closed and the interpolation-order branch
+(quintic at matched grid) is in the queue.
+
+\begin{thebibliography}{9}
+\bibitem{boukir97}
+K.~Boukir, Y.~Maday, B.~M\'etivet, E.~Razafindrakoto,
+A high-order characteristics/finite element method for the incompressible
+Navier--Stokes equations,
+\emph{Int.\ J. Numer.\ Meth.\ Fluids} \textbf{25}, 1421--1454 (1997).
+
+\bibitem{xiu01}
+D.~Xiu, G.E.~Karniadakis,
+A semi-Lagrangian high-order method for Navier--Stokes equations,
+\emph{J.~Comput.\ Phys.} \textbf{172}, 658--684 (2001).
+
+\bibitem{xu02}
+J.~Xu, D.~Xiu, G.E.~Karniadakis,
+A semi-Lagrangian method for turbulence simulations using mixed spectral
+discretizations,
+\emph{J.~Sci.\ Comput.} \textbf{17}, 585--597 (2002).
+
+\bibitem{xiu05}
+D.~Xiu, S.J.~Sherwin, S.~Dong, G.E.~Karniadakis,
+Strong and auxiliary forms of the semi-Lagrangian method for incompressible
+flows,
+\emph{J.~Sci.\ Comput.} \textbf{25}, 323--346 (2005).
+
+\bibitem{falcone98}
+M.~Falcone, R.~Ferretti,
+Convergence analysis for a class of high-order semi-Lagrangian advection
+schemes,
+\emph{SIAM J. Numer.\ Anal.} \textbf{35}, 909--940 (1998).
+
+\bibitem{giraldo98}
+F.X.~Giraldo,
+The Lagrange--Galerkin spectral element method on unstructured quadrilateral
+grids,
+\emph{J.~Comput.\ Phys.} \textbf{147}, 114--146 (1998).
+
+\bibitem{staniforth91}
+A.~Staniforth, J.~C\^ot\'e,
+Semi-Lagrangian integration schemes for atmospheric models --- a review,
+\emph{Mon.\ Wea.\ Rev.} \textbf{119}, 2206--2223 (1991).
+
+\bibitem{kio91}
+G.E.~Karniadakis, M.~Israeli, S.A.~Orszag,
+High-order splitting methods for the incompressible Navier--Stokes equations,
+\emph{J.~Comput.\ Phys.} \textbf{97}, 414--443 (1991).
+
+\bibitem{mpr90}
+Y.~Maday, A.T.~Patera, E.M.~R{\o}nquist,
+An operator-integration-factor splitting method for time-dependent problems:
+application to incompressible fluid flow,
+\emph{J.~Sci.\ Comput.} \textbf{5}, 263--292 (1990).
+
+\bibitem{kmm87}
+J.~Kim, P.~Moin, R.~Moser,
+Turbulence statistics in fully developed channel flow at low Reynolds number,
+\emph{J.~Fluid Mech.} \textbf{177}, 133--166 (1987);
+R.D.~Moser, J.~Kim, N.N.~Mansour,
+DNS of turbulent channel flow up to $\mathrm{Re}_\tau=590$,
+\emph{Phys.\ Fluids} \textbf{11}, 943--945 (1999).
+\end{thebibliography}
+
+\end{document}

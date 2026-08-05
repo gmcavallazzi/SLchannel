@@ -10,7 +10,7 @@ import math
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import make_field, report, sl_field_interp
+from _slhelpers import make_field, report
 
 torch.set_default_dtype(torch.float64)
 
@@ -29,8 +29,7 @@ def run():
         return torch.cos(2 * math.pi * X / Lx) * torch.sin(math.pi * Z / Lz) + 0 * Y
 
     for w0, label in [(-0.5, "toward top wall"), (0.5, "toward bottom wall")]:
-        adv = SLAdvector(NX, NY, NZ, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA,
-                         field_interp=sl_field_interp())
+        adv = SLAdvector(NX, NY, NZ, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA)
         fields = {c: make_field(c, f, NX, NY, NZ, dx, dy, z_f, z_c) for c in 'uvw'}
         mid_u = torch.zeros(NX + 1, NY + 2, NZ + 2)
         mid_v = torch.zeros(NX + 2, NY + 1, NZ + 2)

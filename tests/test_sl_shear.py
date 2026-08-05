@@ -10,7 +10,7 @@ import math
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import make_field, report, sl_field_interp
+from _slhelpers import make_field, report
 
 torch.set_default_dtype(torch.float64)
 
@@ -24,8 +24,7 @@ def shear_error(nx, order):
     ny, nz = nx, 32
     dx, dy = Lx / nx, Ly / ny
     z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type='symmetric')
-    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA, order=order,
-                     field_interp=sl_field_interp())
+    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA, order=order)
 
     def f(X, Y, Z):
         return torch.sin(2 * math.pi * X / Lx) + 0 * Y + 0 * Z
@@ -59,13 +58,9 @@ def run():
     ok &= report("shear convergence O(h^4)", e1 / e2 > 10.0,
                  f"errors={e1:.3e},{e2:.3e} ratio={e1 / e2:.1f} (ideal 16)")
 
-    if sl_field_interp() == 'lagrange':
-        e_quintic = shear_error(64, 6)
-        ok &= report("shear, triquintic beats tricubic", e_quintic < e_cubic / 10,
-                     f"quintic={e_quintic:.3e} cubic={e_cubic:.3e}")
-    else:
-        print("[skip] triquintic-vs-tricubic: order applies to the Lagrange "
-              "remap only (spline mode is a single C^2 cubic interpolant)")
+    e_quintic = shear_error(64, 6)
+    ok &= report("shear, triquintic beats tricubic", e_quintic < e_cubic / 10,
+                 f"quintic={e_quintic:.3e} cubic={e_cubic:.3e}")
     return ok
 
 

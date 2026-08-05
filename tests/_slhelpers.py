@@ -2,17 +2,7 @@
 fields from analytic functions evaluated at every entry's physical position
 (ghosts included), so interpolation tests need no BC machinery."""
 
-import os
-
 import torch
-
-
-def sl_field_interp():
-    """Field-remap mode for the whole suite: run any test with
-    SL_FIELD_INTERP=spline to exercise the C^2 spline path (default:
-    lagrange). Tests whose expectations are Lagrange-specific (order=6
-    rates, quintic-vs-cubic) skip those checks in spline mode."""
-    return os.environ.get('SL_FIELD_INTERP', 'lagrange')
 
 
 def full_positions(comp, nx, ny, nz, dx, dy, z_f, z_c):
@@ -72,8 +62,7 @@ def make_config_file(tmpdir, *, nx=16, ny=16, nz=32,
         'output': {'results_folder': os.path.join(tmpdir, 'results'),
                    'n_out': 10**8, 'n_save': 10**8},
         'advection': {'scheme': scheme},
-        'sl': {'interp_order': 4, 'n_traj_iters': 2, 'time_scheme': 'v1',
-               'interp_dtype': 'fp64', 'field_interp': sl_field_interp()},
+        'sl': {'interp_order': 4, 'n_traj_iters': 2, 'interp_dtype': 'fp64'},
         'statistics': {'n_stats': 0},
     }
     if extra:

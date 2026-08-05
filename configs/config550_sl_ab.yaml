@@ -1,67 +1,48 @@
-# ==============================================================================
-# SEMI-LAGRANGIAN A/B — Re_tau = 550, torChannel grid + checkpoint (M4)
-# ==============================================================================
-# Restarts from the torChannel Re_tau=550 turbulent checkpoint on the SAME
-# grid, for a direct wall-clock-per-flow-through comparison. dt+ cap:
-# u_tau = 550/10000 -> dt_max = 0.4*nu/u_tau^2 ~ 0.013 (binds before CFL 3).
-
-grid:
-  nx: 768
-  ny: 768
-  nz: 180
-
+advection:
+  scheme: sl
+compute:
+  device: auto
 domain:
-  Lx: 15.707         # 5*pi
-  Ly: 6.282          # 2*pi
+  Lx: 15.707
+  Ly: 6.282
   Lz: 2.0
-
 flow:
   Re: 10000.0
   Re_tau: 550.0
   U_bulk: 1.0
   gamma: 2.6
-
-advection:
-  scheme: "sl"       # "sl" | "eulerian"
-
-sl:
-  interp_order: 4        # 4 = tricubic, 6 = triquintic
-  traj_interp_order: 2   # 2 = trilinear (fast), 4 = tricubic (O(dt^2) studies)
-  n_traj_iters: 2
-  time_scheme: "v1"      # "v1" (robust, 1st order) | "v2" (2nd order)
-  interp_dtype: "fp64"   # "fp64" | "fp32_accum64"
-
+grid:
+  nx: 768
+  ny: 768
+  nz: 180
 initialization:
-  type: "vortices"                # ignored when field_file is set (restart)
-  field_file: "/home/giorgio/torChannel/results_big_550_stats/fields.npz"
+  field_file: /home/giorgio/torChannel/results_big_550_stats/fields.npz
   reset_time: true
-
-solver:
-  type: "fft"
-
-time:
-  dt: 0.01
-  n_steps: 2000000000
-  t_max: 50.0
-  CFL_target: 3.0          # TRAJECTORY CFL (SL scheme; the sweep is 1..4)
-  dt_update_interval: 10
-  dt_max: 0.013            # dt+ ~ 0.4 physical-accuracy cap
-  dt_min: 0.0005
-  scheme: "IMEX"           # used only when advection.scheme == "eulerian"
-
-compute:
-  device: "auto"
-
+  type: vortices
 output:
-  results_folder: results_550_sl_ab
   n_out: 50
   n_save: 2000
-
+  results_folder: results_550_sl_ab
+sl:
+  interp_dtype: fp64
+  interp_order: 4
+  n_traj_iters: 2
+  traj_interp_order: 2
+solver:
+  type: fft
 statistics:
   enabled: true
-  n_stats: 20              # every ~1.4 time units at dt ~ 0.07 (10x fewer
-                           # steps than an Eulerian run: cadence set in TIME)
+  n_stats: 20
+  output_file: turbulence_stats.npz
+  state_file: turbulence_stats_state.npz
   t_stats: 5.0
-  output_file: "turbulence_stats.npz"
-  state_file: "turbulence_stats_state.npz"
   z_plus_target: 15.0
+time:
+  CFL_target: 3.0
+  dt: 0.01
+  dt_max: 0.013
+  dt_min: 0.0005
+  dt_update_interval: 10
+  n_steps: 2000000000
+  scheme: IMEX
+  t_max: 50.0

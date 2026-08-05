@@ -33,7 +33,6 @@ sl:
   interp_dtype: fp32_accum64
   interp_order: 4
   n_traj_iters: 2
-  time_scheme: bdf2
   traj_interp_order: 2
 solver:
   type: fft
@@ -52,4 +51,4 @@ time:
   dt_update_interval: 0
   n_steps: 2000000000
   scheme: IMEX
-  t_max: 480.0
+  t_max: 980.0

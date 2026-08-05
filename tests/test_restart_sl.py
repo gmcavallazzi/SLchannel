@@ -1,7 +1,7 @@
 """Restart continuity: 10 steps + checkpoint + 10 restarted steps must match a
-20-step uninterrupted run closely. Not bit-identical by design: the restart
-re-bootstraps the AB2 trajectory extrapolation (V_mid = V^n for one step),
-exactly like torChannel's AB2 bootstrap; the resulting one-step O(dt^2)
+20-step uninterrupted run closely. Not bit-identical by design: the bdf2
+restart re-bootstraps with one BDF1 step (histories unavailable), the same
+one-step O(dt^2) allowance as torChannel's AB2 bootstrap; the resulting
 perturbation must stay small."""
 
 import sys, os, tempfile
@@ -15,17 +15,17 @@ torch.set_default_dtype(torch.float64)
 DT = 0.01
 
 
-def run_case(time_scheme):
+def run_case():
     from solver import SLChannelFlow
     from utils import save_flow_fields
 
-    extra = {'sl': {'time_scheme': time_scheme}}
+    extra = {}
     with tempfile.TemporaryDirectory() as tmp:
         cfg = make_config_file(tmp, nx=16, ny=16, nz=32, Re=1000.0, gamma=1.5,
                                init_type='vortices', pert=0.08, dt=DT, extra=extra)
 
         def stepper(s):
-            return s.step_sl_bdf2 if time_scheme == 'bdf2' else s.step_sl
+            return s.step_sl_bdf2
 
         # uninterrupted 20 steps
         ref = SLChannelFlow(config_file=cfg)
@@ -59,14 +59,11 @@ def run_case(time_scheme):
 
 def run():
     ok = True
-    # bdf2 restart re-bootstraps with one BDF1 step (same one-step O(dt^2)
-    # allowance as the AB2 re-bootstrap)
-    for time_scheme in ['v1', 'bdf2']:
-        cont, s2, rel = run_case(time_scheme)
-        ok &= report(f"restart continues from checkpoint [{time_scheme}]",
-                     cont, f"step={s2.initial_step} time={s2.initial_time:.4f}")
-        ok &= report(f"restart matches uninterrupted run [{time_scheme}]", rel < 1e-4,
-                     f"rel_diff={rel:.2e} (bootstrap-limited, not bit-exact)")
+    cont, s2, rel = run_case()
+    ok &= report("restart continues from checkpoint [bdf2]",
+                 cont, f"step={s2.initial_step} time={s2.initial_time:.4f}")
+    ok &= report("restart matches uninterrupted run [bdf2]", rel < 1e-4,
+                 f"rel_diff={rel:.2e} (bootstrap-limited, not bit-exact)")
     return ok
 
 

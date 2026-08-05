@@ -27,7 +27,7 @@ def run():
         n = round(T / dt)
         u_prev_check = None
         for i in range(n):
-            u_bulk, _ = solver.step_sl(dt)
+            u_bulk, _ = solver.step_sl_bdf2(dt)
             if i == n - round(10.0 / dt):
                 u_prev_check = solver.u.clone()
 

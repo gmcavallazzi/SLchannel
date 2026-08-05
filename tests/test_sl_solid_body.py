@@ -7,9 +7,9 @@ For (b) the shift scales with the grid (DT ~ 1/n) so every resolution samples
 the SAME fractional cell offset: the pointwise interpolation-error kernel
 varies with that offset (zero at nodes, max mid-cell), and under a fixed
 physical shift the offset change between resolutions modulates the 2-point
-ratio (measured: x8.7 instead of x16 for the spline remap, x12.6 for
-Lagrange). The trajectory is exact for uniform velocity, so DT does not enter
-the error otherwise."""
+ratio (measured: x12.6 instead of x16 for the Lagrange remap). The
+trajectory is exact for uniform velocity, so DT does not enter the error
+otherwise."""
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -18,7 +18,7 @@ import math
 import torch
 from utils import generate_grid
 from semilag import SLAdvector
-from _slhelpers import make_field, full_positions, report, sl_field_interp
+from _slhelpers import make_field, full_positions, report
 
 torch.set_default_dtype(torch.float64)
 
@@ -34,8 +34,7 @@ def advect_error(n, fn, dt=None):
     nz = n
     dx, dy = Lx / nx, Ly / ny
     z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type='symmetric')
-    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA,
-                     field_interp=sl_field_interp())
+    adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA)
 
     fields = {c: make_field(c, fn, nx, ny, nz, dx, dy, z_f, z_c) for c in 'uvw'}
     mids = {c: make_field(c, lambda X, Y, Z: U0 + 0 * X, nx, ny, nz, dx, dy, z_f, z_c)

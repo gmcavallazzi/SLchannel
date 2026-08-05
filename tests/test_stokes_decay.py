@@ -38,7 +38,7 @@ def run():
         dt, T = 0.02, 1.0
         n = round(T / dt)
         for _ in range(n):
-            solver.step_sl(dt)
+            solver.step_sl_bdf2(dt)
 
         decay = math.exp(-solver.nu * math.pi ** 2 * T)
         exact = decay * torch.sin(math.pi * solver.z_c[1:-1])

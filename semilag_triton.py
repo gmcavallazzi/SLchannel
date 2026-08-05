@@ -20,13 +20,6 @@ Kernels:
                       (uniform x/y closed form, nonuniform z from the actual
                       nodes + precomputed inverse denominators), accumulates
                       the ORDER^3 gather.
-  _spline_gather_kernel : C^2 spline remap (sl.field_interp: spline) —
-                      cubic B-spline weights in x,y over the PREFILTERED
-                      coefficient buffer, Hermite in z from the interleaved
-                      [c_k, m_k] node values/derivatives (4x4x4 gather on
-                      the 2*NZ-deep buffer). The prefilter + tridiagonal
-                      coefficient build stays in torch (semilag._spline_coeffs);
-                      only the per-point evaluation is hot.
 
 Grid conventions identical to semilag.SLAdvector (see its docstring).
 """
@@ -225,98 +218,6 @@ def _gather_kernel(F, XD, YD, ZD, OUT,
     tl.store(OUT + offs, acc, mask=mask)
 
 
-@triton.jit
-def _spline_gather_kernel(Q, XD, YD, ZD, OUT,
-                          znodes,
-                          dx, dy, shift_x, shift_y,
-                          Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                          N, NX: tl.constexpr, NY: tl.constexpr,
-                          NZ: tl.constexpr,
-                          IS_CENTERS: tl.constexpr, IS_SYMMETRIC: tl.constexpr,
-                          BLOCK: tl.constexpr):
-    """C^2 spline evaluation at the departure points. Q is the interleaved
-    coefficient buffer (NX, NY, 2*NZ): Q[..., 2k] = c_k (node value after the
-    x,y B-spline prefilter), Q[..., 2k+1] = m_k (z-spline node derivative)."""
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < N
-
-    x = tl.load(XD + offs, mask=mask, other=0.0)
-    y = tl.load(YD + offs, mask=mask, other=0.0)
-    z = tl.load(ZD + offs, mask=mask, other=0.5)
-    z = tl.minimum(tl.maximum(z, z_lo), z_hi)
-
-    # x,y: cubic B-spline weights on offsets {-1, 0, 1, 2}
-    sx = x / dx + shift_x
-    ix0 = tl.math.floor(sx).to(tl.int32)
-    txf = sx - ix0
-    sy = y / dy + shift_y
-    iy0 = tl.math.floor(sy).to(tl.int32)
-    tyf = sy - iy0
-
-    omt = 1.0 - txf
-    tx2 = txf * txf
-    tx3 = tx2 * txf
-    wx0 = omt * omt * omt / 6.0
-    wx1 = (4.0 - 6.0 * tx2 + 3.0 * tx3) / 6.0
-    wx2 = (1.0 + 3.0 * (txf + tx2 - tx3)) / 6.0
-    wx3 = tx3 / 6.0
-
-    omy = 1.0 - tyf
-    ty2 = tyf * tyf
-    ty3 = ty2 * tyf
-    wy0 = omy * omy * omy / 6.0
-    wy1 = (4.0 - 6.0 * ty2 + 3.0 * ty3) / 6.0
-    wy2 = (1.0 + 3.0 * (tyf + ty2 - ty3)) / 6.0
-    wy3 = ty3 / 6.0
-
-    # z: bracketing interval (ORDER=2 gives m0 clamped to [0, NZ-2]) and
-    # Hermite weights [h00 -> c_k, h10*h -> m_k, h01 -> c_{k+1}, h11*h -> m_{k+1}]
-    m0 = _z_locate(z, znodes, Lz, gamma, tanh_g, nzf,
-                   IS_CENTERS, IS_SYMMETRIC, NZ, 2)
-    z0 = tl.load(znodes + m0)
-    z1 = tl.load(znodes + m0 + 1)
-    h = z1 - z0
-    s = (z - z0) / h
-    s2 = s * s
-    s3 = s2 * s
-    wz0 = 2.0 * s3 - 3.0 * s2 + 1.0
-    wz1 = (s3 - 2.0 * s2 + s) * h
-    wz2 = -2.0 * s3 + 3.0 * s2
-    wz3 = (s3 - s2) * h
-
-    NZ2 = 2 * NZ
-    kz = 2 * m0
-    acc = tl.zeros([BLOCK], dtype=tl.float32)
-    for ii in tl.static_range(4):
-        if ii == 0:
-            wx = wx0
-        elif ii == 1:
-            wx = wx1
-        elif ii == 2:
-            wx = wx2
-        else:
-            wx = wx3
-        ix = _wrap(ix0 + (ii - 1), NX) * (NY * NZ2)
-        for jj in tl.static_range(4):
-            if jj == 0:
-                wy = wy0
-            elif jj == 1:
-                wy = wy1
-            elif jj == 2:
-                wy = wy2
-            else:
-                wy = wy3
-            base = ix + _wrap(iy0 + (jj - 1), NY) * NZ2 + kz
-            wxy = wx * wy
-            acc += wxy * (wz0 * tl.load(Q + base, mask=mask, other=0.0)
-                          + wz1 * tl.load(Q + base + 1, mask=mask, other=0.0)
-                          + wz2 * tl.load(Q + base + 2, mask=mask, other=0.0)
-                          + wz3 * tl.load(Q + base + 3, mask=mask, other=0.0))
-
-    tl.store(OUT + offs, acc, mask=mask)
-
-
 class TritonSL:
     """Launch wrapper bound to one SLAdvector (fp32 pipeline, CUDA)."""
 
@@ -377,21 +278,4 @@ class TritonSL:
             n, spec.NX, spec.NY, spec.NZ,
             spec.ztype == 'centers', adv.stretching_type == 'symmetric',
             adv.order, self.BLOCK)
-        return self.out[comp]
-
-    def gather_spline(self, comp, qbuf, n):
-        """C^2 spline evaluation on the interleaved coefficient buffer
-        (built by semilag._spline_coeffs) at the departure points."""
-        adv = self.adv
-        spec = adv.spec[comp]
-        grid = (triton.cdiv(n, self.BLOCK),)
-        out = self.out[comp].reshape(-1)
-        _spline_gather_kernel[grid](
-            qbuf.reshape(-1), self.xd, self.yd, self.zd, out,
-            spec.znodes.to(torch.float32) if spec.znodes.dtype != torch.float32 else spec.znodes,
-            adv.dx, adv.dy, spec.shift_x, spec.shift_y,
-            adv.Lz, adv.gamma, adv._tanh_g, float(adv.nz), adv.z_lo, adv.z_hi,
-            n, spec.NX, spec.NY, spec.NZ,
-            spec.ztype == 'centers', adv.stretching_type == 'symmetric',
-            self.BLOCK)
         return self.out[comp]
