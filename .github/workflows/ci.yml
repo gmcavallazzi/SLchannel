@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Nightly, 03:17 UTC: the full suite including the slow physics tests.
+    - cron: "17 3 * * *"
 
 jobs:
   test:
@@ -30,10 +33,19 @@ jobs:
       - name: Install slChannel
         run: pip install -e ".[dev]"
 
-      # GPU-marked tests are skipped here (no CUDA on hosted runners) and are
-      # run manually on the GB10 box; see docs/TESTING.md.
+      # Push and PR runs skip the `slow` marker: test_poiseuille_sl (3000
+      # steps) and test_sl_vs_eulerian (8 solver builds) are most of the ~4.5
+      # minutes those runs took, and they exercise convergence behaviour that
+      # does not change commit to commit. The nightly schedule runs everything.
+      # GPU-marked tests are skipped either way -- no CUDA on hosted runners;
+      # they are run manually on the GB10 box, see docs/TESTING.md.
       - name: Run tests
-        run: pytest -q --junitxml=junit-${{ matrix.python }}.xml
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            pytest -q --junitxml=junit-${{ matrix.python }}.xml
+          else
+            pytest -q -m "not slow" --junitxml=junit-${{ matrix.python }}.xml
+          fi
 
       - name: Upload measured quantities
         if: always()

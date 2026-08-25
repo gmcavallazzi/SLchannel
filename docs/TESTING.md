@@ -3,7 +3,7 @@
 ```bash
 pip install -e ".[dev]"
 
-pytest                    # everything (~2.5 min)
+pytest                    # everything (~2 min); CI runs this nightly
 pytest -m "not slow"      # inner loop (~10 s)
 pytest -m gpu             # the CUDA-only tests, on a GPU box
 pytest tests/test_sl_shear.py -q
@@ -21,6 +21,11 @@ tests/test_interp_convergence.py
 Those numbers are the point: a convergence ratio drifting from 16 toward 8 is a
 regression even while the assertion still holds. CI archives them as JUnit XML
 artifacts so they can be diffed across commits.
+
+CI runs `-m "not slow"` on every push and pull request, and the **full** suite
+on a nightly schedule. The two slow tests exercise convergence behaviour that
+does not change commit to commit, and they were most of the ~4.5 minutes a full
+run took on hosted runners.
 
 ## What each test establishes
 
