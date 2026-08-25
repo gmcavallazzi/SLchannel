@@ -54,4 +54,14 @@ commit `05a1b30`. Commit `85cb224` removed the experimental time schemes
 (`v1`, `v2`, `pc`) and the C² spline interpolation path after the campaigns
 settled on BDF2 — configs still carrying those keys raise an explanatory error.
 
+## [1.0.1] — 2026-08-25
+
+Metadata only; no code change.
+
+- Record the software DOI, minted by Zenodo on the v1.0.0 release, in
+  `CITATION.cff` and the README. The concept DOI is used deliberately: it
+  resolves to the latest release, so it never needs editing again.
+- Run the two slow tests on a nightly schedule rather than on every push.
+
 [1.0.0]: https://github.com/gmcavallazzi/SLchannel/releases/tag/v1.0.0
+[1.0.1]: https://github.com/gmcavallazzi/SLchannel/releases/tag/v1.0.1

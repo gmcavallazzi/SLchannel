@@ -1,6 +1,7 @@
 # slChannel — Semi-Lagrangian DNS of turbulent channel flow
 
 [![CI](https://github.com/gmcavallazzi/SLchannel/actions/workflows/ci.yml/badge.svg)](https://github.com/gmcavallazzi/SLchannel/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099955.svg)](https://doi.org/10.5281/zenodo.22099955)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
@@ -106,9 +107,15 @@ fuser and Triton's launcher build both fail otherwise.
 
 MIT (see `LICENSE`).
 
-If you use slChannel in published work, please cite it via `CITATION.cff` —
-GitHub renders it as a "Cite this repository" button with BibTeX and APA forms.
-The software DOI is minted on the first tagged release.
+If you use slChannel in published work, please cite it:
+
+> G. M. Cavallazzi, *slChannel: semi-Lagrangian DNS of turbulent channel flow
+> on GPUs*. Zenodo. <https://doi.org/10.5281/zenodo.22099955>
+
+That is the concept DOI and always resolves to the latest release; the Zenodo
+record also carries a version-specific DOI if you need to pin one. GitHub
+renders `CITATION.cff` as a "Cite this repository" button with BibTeX and APA
+forms.
 
 If you use the validation dataset, cite it separately:
 

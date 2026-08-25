@@ -25,7 +25,7 @@ import torch
 # Set it at import so library users get the same numerics as the CLI.
 torch.set_default_dtype(torch.float64)
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Imported after the dtype is set: the submodules build tensors at import time
 # and must see float64.

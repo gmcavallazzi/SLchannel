@@ -7,7 +7,7 @@ authors:
     given-names: Giorgio Maria
     orcid: "https://orcid.org/0000-0001-7529-3256"
     affiliation: "City St. George's, University of London"
-version: 1.0.0
+version: 1.0.1
 license: MIT
 repository-code: "https://github.com/gmcavallazzi/SLchannel"
 abstract: >-
@@ -33,6 +33,4 @@ keywords:
   - turbulent channel flow
   - GPU
   - PyTorch
-# doi:                       # TODO: the SOFTWARE DOI, minted on the first
-#                            # GitHub release. 10.5281/zenodo.22099569 is the
-#                            # DATA record, not this.
+doi: 10.5281/zenodo.22099955
