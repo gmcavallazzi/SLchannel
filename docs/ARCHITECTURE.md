@@ -7,6 +7,11 @@ along characteristics (Boukir et al. 1997, BDF2), so the timestep is limited by
 physical accuracy — trajectory CFL 2–5, dt⁺ ≲ 0.25 — instead of by an advective
 CFL of about 0.28.
 
+The complete discrete formulation — every substep of the time step as coded in
+`solver.py`/`semilag.py`, with the literature it comes from — is written out in
+the theory manual, `docs/theory/slchannel_algorithm.pdf` (LaTeX source
+alongside it, versioned with the code).
+
 Everything is `torch.float64` except the interpolation arithmetic, which is
 deliberately fp32-with-fp64-accumulation on GPUs where fp64 throughput is a
 small fraction of fp32.

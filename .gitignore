@@ -29,6 +29,7 @@ data/
 !report/*.pdf
 !docs/figures/*.png
 !docs/figures/*.pdf
+!docs/theory/*.pdf
 
 # --- LaTeX build artifacts ---------------------------------------------------
 *.aux

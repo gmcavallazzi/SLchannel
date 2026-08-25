@@ -101,7 +101,7 @@ fuser and Triton's launcher build both fail otherwise.
 | `docs/TESTING.md` | What each test establishes; how to add one. |
 | `docs/REPRODUCING.md` | From a clone to the published numbers. |
 | `docs/PROVENANCE.md` | What was inherited from the parent solver, and what changed. |
-| `report/sl_dns_report.pdf` | Theory, the literature, and the full discrete algorithm substep by substep (§3.2). |
+| `docs/theory/slchannel_algorithm.pdf` | Theory manual: notation, the literature the scheme rests on, and the full discrete algorithm substep by substep. |
 
 ## License and citation
 
