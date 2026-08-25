@@ -20,8 +20,8 @@
 \title{Semi-Lagrangian DNS of turbulent channel flow:\\
 what the literature proves, what \texttt{slChannel} does,\\
 and where the gaps are}
-\author{G.~Cavallazzi \and Claude (Anthropic)}
-\date{August 4, 2026}
+\author{G.~Cavallazzi}
+\date{August 25, 2026}
 
 \begin{document}
 \maketitle
@@ -346,30 +346,30 @@ an averaging artifact.
 Staggered MAC finite differences ($x,y$ uniform periodic, $z$
 tanh-stretched), \texttt{torch.float64} infrastructure with fp32-accumulate
 Triton gather kernels for the interpolation. Feet by iterated midpoint
-(\ref{eq:midpoint}) with trilinear or trilinear$\to$tricubic trajectory
-sampling; fields remapped by tensor-product Lagrange stencils (tricubic
-$P{=}3$ / triquintic $P{=}5$; nonuniform-node weights in $z$ against the
-actual grid, analytic inverse tanh map for stencil location) or by the C$^2$
-prefiltered spline path. Time schemes:
-\begin{itemize}
-\item \texttt{v1}: backward-Euler-class splitting, $\mathcal O(\Delta t)$,
-robust (the literature's first-order scheme);
-\item \texttt{v2}: the true departure-averaged CN (\ref{eq:cnright}) with
-incremental pressure and trajectory-CN diffusion,
-$\mathcal O(\Delta t^2)$ (self-convergence ratio $3.93$);
-\item \texttt{bdf2}: Boukir BDF2 (\ref{eq:bdf2}), frozen
+(\ref{eq:midpoint}) with trilinear (default) or tricubic trajectory sampling;
+fields remapped by tensor-product Lagrange stencils (tricubic $P{=}3$ /
+triquintic $P{=}5$; nonuniform-node weights in $z$ against the actual grid,
+analytic inverse tanh map for stencil location).
+
+The time scheme is Boukir BDF2 (\ref{eq:bdf2}) and nothing else: frozen
 $U^{*}=2\bu^{n}-\bu^{n-1}$, two independent feet at $\Delta t$ and
 $2\Delta t$, update $\hat u = (4\bar u - \bar{\bar u})/3$, $\theta{=}1$
-$z$-solve and FFT projection at $\Delta t_{\mathrm{eff}}=2\Delta t/3$,
-\texttt{noninc}/\texttt{inc} pressure (ratios $2.0$ / $4.00$).
-\end{itemize}
-Trajectory velocity options \texttt{ab2} (extrapolation, the literature
-default), \texttt{none} (diagnostic), and \texttt{pc}
-(predictor--corrector, predictor \emph{projected} --- the ``additional
-projection'' of \cite{xiu01}, self-convergence $3.78$). Mass flux is imposed
+$z$-solve and FFT projection at $\Delta t_{\mathrm{eff}}=2\Delta t/3$, with
+\texttt{noninc} (production) or \texttt{inc} pressure --- velocity
+self-convergence ratios $2.0$ and $4.00$ respectively. Mass flux is imposed
 exactly by a uniform divergence-free shift (CaNS convention); Reynolds
 stresses are accumulated about the \emph{time} mean at each component's own
 staggered nodes.
+
+The campaigns reported in \S\ref{sec:beyond} also exercised a first-order
+backward-Euler splitting (\texttt{v1}), a departure-averaged
+Crank--Nicolson scheme with incremental pressure (\texttt{v2},
+self-convergence $3.93$), projected predictor--corrector trajectories
+(\texttt{pc}, $3.78$), and a C$^{2}$ prefiltered spline remap. All are
+reported here as \emph{evidence}, and all were removed from the code once
+BDF2 won the stability-versus-accuracy trade: the released solver implements
+the single scheme above. An Eulerian IMEX path is retained purely as a
+like-for-like reference for validation and benchmarking.
 
 \subsection{One step in full: the discrete equations}
 \label{sec:algorithm}
@@ -588,6 +588,7 @@ Taylor-analysis claims of both papers.
 \end{enumerate}
 
 \subsection{Results beyond the literature}
+\label{sec:beyond}
 
 \paragraph{(a) The high-$k$ spectral floor and its mechanism.} For
 $\dtp > \dtp_{*}\approx0.22$ (streamwise $\mathrm{CFL}\approx0.65$, the
@@ -651,7 +652,11 @@ implicated.
 register-resident Triton gather kernels the full three-component tricubic
 advect costs $126$\,ms at $768^2\times180$ (fp32-accumulate-64); the SL step
 is $1.3$--$2.1\times$ the Eulerian step cost, and at the physics-limited
-$\dtp$ the net gain is $2$--$3.2\times$ per simulated time unit --- where
+$\dtp$ the net gain is $2$--$3.2\times$ per simulated time unit. Measured
+end-to-end on the production closed-channel case at $256^{2}\times256$
+(triquintic, $\dtp=0.25$): $336$\,ms/step against the Eulerian twin's
+$203$\,ms/step at $\dtp\approx0.057$, i.e.\ $15.6$ versus $41.4$\,s per
+simulated time unit, a net $\mathbf{2.65\times}$ --- where
 \cite{xu02} reported net $1.0\times$ (global interpolation) and
 \cite{xiu01} $4\times$ on laminar spectral-element cases. The remaining cost
 is shared fp64 infrastructure (FFT-Poisson, implicit $z$-diffusion), not the
@@ -836,6 +841,13 @@ The honest summary: parallelising SL channel DNS is \emph{not} the hard part
 of this method; the two-foot stability boundary (\ref{eq:gain}) and the
 interpolation-dissipation bias are.
 
+\section*{Note on tooling}
+\addcontentsline{toc}{section}{Note on tooling}
+Parts of the implementation, the analysis scripts and the drafting of this
+report were carried out with the assistance of Claude (Anthropic). All results
+reported here were produced by the code in the repository and verified by the
+author, who takes full responsibility for their content.
+
 \section{Verdict}
 
 Boukir et al.\ supply the theorem-backed time skeleton; Xiu \& Karniadakis
@@ -848,10 +860,18 @@ takes. Everything downstream of that --- the spectral floor and its
 extrapolation mechanism, the $17/9$ two-foot bifurcation, the
 interpolation-dissipation cost in $\ut$ measured against MKM with converged
 statistics, and the GPU cost model that finally makes the method a net win
---- is not in the literature. Those are the contributions; with the tc256
-run landed ($\Ret=176.4$, $-1.0\%$ at $\Delta x^{+}=8.8$), the resolution
-branch of the fidelity map is closed and the interpolation-order branch
-(quintic at matched grid) is in the queue.
+--- is not in the literature. Those are the contributions, and the fidelity
+map is now closed on both axes. The resolution branch: tricubic at
+$\Delta x^{+}=11.8$ gives $\Ret=173.9$ ($-2.4\%$), at $\Delta x^{+}=8.8$
+$\Ret=176.4$ ($-1.0\%$). The interpolation-order branch: triquintic at
+$\Delta x^{+}=8.8$ recovers $\Ret$ to $+0.4\%$ of MKM with the peak
+$u'_{\mathrm{rms}}^{+}$ within $-0.2\%$ --- inside sampling noise, and
+better than the Eulerian twin on the same grid --- for $+2.6\%$ on the step
+cost. Interpolation dissipation is therefore the entire statistics bias of the
+method, and it is removable by order and resolution rather than intrinsic. What
+remains intrinsic is temporal: the extrapolation-driven spectral floor above
+$\dtp\approx0.22$ and the $17/9$ two-foot gain that ends the usable range at
+$\dtp\approx0.30$.
 
 \begin{thebibliography}{9}
 \bibitem{boukir97}

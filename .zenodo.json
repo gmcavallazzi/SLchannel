@@ -1,0 +1,29 @@
+{
+  "title": "slChannel: semi-Lagrangian DNS of turbulent channel flow on GPUs",
+  "upload_type": "software",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Cavallazzi, Giorgio Maria",
+      "orcid": "0000-0000-0000-0000",
+      "affiliation": "TODO"
+    }
+  ],
+  "description": "<p>A GPU direct-numerical-simulation solver for incompressible turbulent channel flow that replaces CFL-limited explicit advection with unconditionally stable second-order semi-Lagrangian advection along characteristics (Boukir et al. 1997, BDF2). The timestep is then limited by physical accuracy rather than by an advective CFL condition, giving a 2.65x reduction in wall-clock time per simulated time unit at matched turbulence statistics.</p>",
+  "keywords": [
+    "computational fluid dynamics",
+    "direct numerical simulation",
+    "semi-Lagrangian advection",
+    "turbulent channel flow",
+    "GPU",
+    "PyTorch"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.22099568",
+      "relation": "isSupplementedBy",
+      "resource_type": "dataset",
+      "scheme": "doi"
+    }
+  ]
+}
