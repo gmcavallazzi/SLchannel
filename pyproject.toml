@@ -9,7 +9,7 @@ description = "Semi-Lagrangian DNS of turbulent channel flow on the GPU"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-authors = [{ name = "Giorgio Cavallazzi", email = "gio.cava10@gmail.com" }]
+authors = [{ name = "Giorgio Maria Cavallazzi", email = "gio.cava10@gmail.com" }]
 keywords = [
     "computational-fluid-dynamics", "direct-numerical-simulation",
     "semi-lagrangian", "turbulence", "channel-flow", "pytorch",
