@@ -1,12 +1,13 @@
-# TorChannel Requirements
-# GPU-accelerated DNS for turbulent channel flow
+# slChannel runtime dependencies.
+# Prefer `pip install -e .` (see pyproject.toml); this file is kept for
+# environments that cannot install the package.
 
-# Core dependencies
-torch>=1.10.0
-numpy>=1.20.0
-matplotlib>=3.3.0
-pyyaml>=5.4.0
+torch>=2.1
+numpy>=1.24
+pyyaml>=6.0
+matplotlib>=3.6
 
-# Optional: For better plotting
-# Uncomment if you have LaTeX installed
-# latex
+# Optional, Linux + CUDA only: the hand-written gather kernels that make the
+# semi-Lagrangian advection fast (semilag_triton.py, eulerian_triton.py).
+# Without it the code falls back to torch.compile/eager automatically.
+# triton>=3.0
