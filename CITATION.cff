@@ -5,7 +5,8 @@ type: software
 authors:
   - family-names: Cavallazzi
     given-names: Giorgio Maria
-    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO before release
+    orcid: "https://orcid.org/0000-0001-7529-3256"
+    affiliation: "City St. George's, University of London"
 version: 1.0.0
 license: MIT
 repository-code: "https://github.com/gmcavallazzi/SLchannel"
@@ -22,6 +23,7 @@ references:
     authors:
       - family-names: Cavallazzi
         given-names: Giorgio Maria
+        orcid: "https://orcid.org/0000-0001-7529-3256"
     doi: 10.5281/zenodo.22099568
     year: 2026
 keywords:
