@@ -22,7 +22,7 @@ initialization:
 output:
   n_out: 50
   n_save: 2000
-  results_folder: results_180_ref
+  results_folder: results/re180_eulerian
 sl:
   interp_dtype: fp64
   interp_order: 4

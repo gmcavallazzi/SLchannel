@@ -15,7 +15,7 @@ The output npz stores the SOURCE grid (CaNS z_c/z_f); the solver's
 the initial projection, so grid mismatch is handled downstream.
 
 Usage:
-  python scripts/cans_to_npz.py <cans_data_dir> <out.npz> \
+  python tools/cans_to_npz.py <cans_data_dir> <out.npz> \
       --fld fld_backup/fld.bin --Lx 10.68 --Ly 3.2 --nu 3.4843e-4
 """
 
@@ -28,24 +28,29 @@ import numpy as np
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('data_dir', help='CaNS data directory (contains grid.out)')
-    ap.add_argument('out', help='output .npz path')
-    ap.add_argument('--fld', default='fld.bin', help='field file, relative to data_dir')
-    ap.add_argument('--Lx', type=float, required=True)
-    ap.add_argument('--Ly', type=float, required=True)
-    ap.add_argument('--nu', type=float, required=True,
-                    help='kinematic viscosity (for the u_tau diagnostic only)')
+    ap.add_argument("data_dir", help="CaNS data directory (contains grid.out)")
+    ap.add_argument("out", help="output .npz path")
+    ap.add_argument("--fld", default="fld.bin", help="field file, relative to data_dir")
+    ap.add_argument("--Lx", type=float, required=True)
+    ap.add_argument("--Ly", type=float, required=True)
+    ap.add_argument(
+        "--nu",
+        type=float,
+        required=True,
+        help="kinematic viscosity (for the u_tau diagnostic only)",
+    )
     args = ap.parse_args()
 
     # ---- grid ------------------------------------------------------------
-    tokens = np.array(open(os.path.join(args.data_dir, 'grid.out')).read().split(),
-                      dtype=np.float64)
+    tokens = np.array(
+        open(os.path.join(args.data_dir, "grid.out")).read().split(), dtype=np.float64
+    )
     if tokens.size % 5 != 0:
         sys.exit(f"grid.out token count {tokens.size} is not a multiple of 5")
-    g = tokens.reshape(-1, 5)          # rows k = 0..n3+1
+    g = tokens.reshape(-1, 5)  # rows k = 0..n3+1
     n3 = g.shape[0] - 2
-    z_f = g[:n3 + 1, 1].copy()         # faces 0..n3 (wall to wall)
-    z_c = g[:, 2].copy()               # centers incl. both ghosts (n3+2)
+    z_f = g[: n3 + 1, 1].copy()  # faces 0..n3 (wall to wall)
+    z_c = g[:, 2].copy()  # centers incl. both ghosts (n3+2)
     Lz = z_f[-1]
     assert np.all(np.diff(z_f) > 0), "z_f not monotone"
     assert abs(z_c[0] + z_c[1]) < 1e-12, "bottom ghost center is not mirrored"
@@ -63,8 +68,8 @@ def main():
     t_chk, istep = raw[-2], int(raw[-1])
 
     def comp(idx):
-        f = raw[idx * npts:(idx + 1) * npts]
-        return f.reshape((n1, n2, n3), order='F')
+        f = raw[idx * npts : (idx + 1) * npts]
+        return f.reshape((n1, n2, n3), order="F")
 
     cu, cv, cw, cp = (comp(i) for i in range(4))
 
@@ -73,10 +78,10 @@ def main():
     v = np.zeros((n1 + 2, n2 + 1, n3 + 2))
     w = np.zeros((n1 + 2, n2 + 2, n3 + 1))
     p = np.zeros((n1 + 2, n2 + 2, n3 + 2))
-    u[1:n1 + 1, 1:n2 + 1, 1:n3 + 1] = cu
-    v[1:n1 + 1, 1:n2 + 1, 1:n3 + 1] = cv
-    w[1:n1 + 1, 1:n2 + 1, 1:n3] = cw[:, :, :n3 - 1]   # cw k=n3 is the top face (0)
-    p[1:n1 + 1, 1:n2 + 1, 1:n3 + 1] = cp
+    u[1 : n1 + 1, 1 : n2 + 1, 1 : n3 + 1] = cu
+    v[1 : n1 + 1, 1 : n2 + 1, 1 : n3 + 1] = cv
+    w[1 : n1 + 1, 1 : n2 + 1, 1:n3] = cw[:, :, : n3 - 1]  # cw k=n3 is the top face (0)
+    p[1 : n1 + 1, 1 : n2 + 1, 1 : n3 + 1] = cp
 
     # periodic ghosts in x, y
     for f in (u, v, w, p):
@@ -100,14 +105,28 @@ def main():
     dudz_w = u[1:, 1:-1, 1].mean() / z_c[1]
     u_tau = np.sqrt(args.nu * abs(dudz_w))
     print(f"source: {n1}x{n2}x{n3}, Lz={Lz:.6f}, checkpoint t={t_chk:.3f} istep={istep}")
-    print(f"u_bulk = {u_bulk:.6f}   u_tau = {u_tau:.5f}   "
-          f"Re_tau = {u_tau * Lz / args.nu:.1f}   dz1+ = {dz_f[0] * u_tau / args.nu:.3f}")
+    print(
+        f"u_bulk = {u_bulk:.6f}   u_tau = {u_tau:.5f}   "
+        f"Re_tau = {u_tau * Lz / args.nu:.1f}   dz1+ = {dz_f[0] * u_tau / args.nu:.3f}"
+    )
 
-    np.savez(args.out, u=u, v=v, w=w, p=p, z_c=z_c, z_f=z_f,
-             Lx=args.Lx, Ly=args.Ly, step=istep, time=t_chk,
-             u_tau=u_tau, forcing=0.0)
+    np.savez(
+        args.out,
+        u=u,
+        v=v,
+        w=w,
+        p=p,
+        z_c=z_c,
+        z_f=z_f,
+        Lx=args.Lx,
+        Ly=args.Ly,
+        step=istep,
+        time=t_chk,
+        u_tau=u_tau,
+        forcing=0.0,
+    )
     print(f"wrote {args.out}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

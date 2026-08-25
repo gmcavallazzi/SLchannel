@@ -1,0 +1,72 @@
+# Self-contained semi-Lagrangian demo -- no external restart field needed.
+#
+#   slchannel configs/demo_sl_re180.yaml
+#
+# A coarse channel started from a vortex-perturbed profile, run for 10 time
+# units with the production SL BDF2 scheme. Finishes in roughly two minutes on
+# a CPU and seconds on a GPU. Its purpose is to show that the solver installs,
+# runs, and keeps the velocity field discretely divergence-free -- the max|div|
+# column should stay below 1e-11 at every step and u_bulk should sit at 1.0.
+#
+# This is NOT a turbulence-resolving simulation: at this Reynolds number and
+# resolution the flow relaminarises toward the Poiseuille parabola. For real
+# statistics see configs/config_kmm180_tc256q_sl_bdf2.yaml and
+# docs/REPRODUCING.md.
+
+advection:
+  scheme: sl
+
+compute:
+  device: auto
+
+domain:
+  Lx: 6.283185307179586
+  Ly: 3.141592653589793
+  Lz: 2.0
+  stretching_type: symmetric
+
+flow:
+  Re: 2000.0
+  Re_tau: 130.0
+  U_bulk: 1.0
+  gamma: 1.5
+
+grid:
+  nx: 32
+  ny: 32
+  nz: 48
+
+initialization:
+  type: vortices
+  n_vortices: 2
+  perturbation_intensity: 0.08
+
+solver:
+  type: fft
+
+sl:
+  interp_order: 4          # tricubic; 6 (triquintic) is the production choice
+  traj_interp_order: 2
+  n_traj_iters: 2
+  interp_dtype: fp64
+  bdf2_pressure: noninc
+  bdf2_xy_rhs: extrap
+
+time:
+  scheme: IMEX
+  dt: 0.025
+  dt_max: 0.025
+  dt_min: 0.001
+  dt_update_interval: 0    # BDF2 assumes constant dt -- keep it pinned
+  CFL_target: 3.0          # trajectory CFL under the SL scheme
+  n_steps: 400
+  t_max: 10.0
+
+output:
+  results_folder: results_demo
+  n_out: 20
+  n_save: 200
+
+statistics:
+  enabled: false
+  n_stats: 0

@@ -20,13 +20,13 @@ grid:
   ny: 256
   nz: 256
 initialization:
-  field_file: data/tor180c256_seed.npz
+  field_file: data/kmm180_seed_256cubed.npz
   reset_time: true
   type: file
 output:
   n_out: 200
   n_save: 5000
-  results_folder: results_fix/kmm_tc256q
+  results_folder: results/kmm180_quintic
   t_snapshot: 10.0
 sl:
   bdf2_pressure: noninc
