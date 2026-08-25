@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # The CPU wheel index MUST come first and on its own: a plain
+      # `pip install torch` pulls ~2.5 GB of bundled CUDA libraries and
+      # exhausts the runner's disk.
+      - name: Install PyTorch (CPU)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install slChannel
+        run: pip install -e ".[dev]"
+
+      # GPU-marked tests are skipped here (no CUDA on hosted runners) and are
+      # run manually on the GB10 box; see docs/TESTING.md.
+      - name: Run tests
+        run: pytest -q --junitxml=junit-${{ matrix.python }}.xml
+
+      - name: Upload measured quantities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.python }}
+          path: junit-${{ matrix.python }}.xml
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  build:
+    name: build and import from a wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/python -c "import slchannel, slchannel.solver, slchannel.semilag"
+          /tmp/venv/bin/slchannel --version
+      - name: No oversized files tracked
+        run: |
+          big=$(git ls-files | xargs -r -I{} du -k {} | awk '$1 > 5120 {print}')
+          if [ -n "$big" ]; then echo "tracked files over 5 MB:"; echo "$big"; exit 1; fi
+
+  configs:
+    name: shipped configs parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: |
+          python - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          for f in sorted(glob.glob("configs/*.yaml")):
+              try:
+                  cfg = yaml.safe_load(open(f))
+                  assert "advection" in cfg and "grid" in cfg, "missing required section"
+                  print(f"ok   {f}")
+              except Exception as e:
+                  print(f"FAIL {f}: {e}"); bad += 1
+          sys.exit(bad)
+          PY
