@@ -81,6 +81,8 @@ ignored.
 | `dt_update_interval` | int | `0` | Steps between adaptive-dt updates. **`0` disables adaptation — required for bdf2.** |
 | `CFL_target` | float | *required* | Under `sl` this is the **trajectory** CFL (2–5 typical), not an advective CFL. Under `eulerian` it is the usual advective CFL (≤ 0.28). |
 | `n_steps` | int | *required* | Step budget; the run stops at whichever of this and `t_max` comes first. |
+| `stop_on_blowup` | bool | `true` | Stop when u_tau exceeds `blowup_u_tau_factor` x the nominal u_tau (Re_tau nu/delta) on three consecutive diagnostics. A blown SL run saturates at finite amplitude, so the NaN check never fires; this is the guard that ends it. The last state is saved to `fields_blowup.npz`. |
+| `blowup_u_tau_factor` | float | `2.0` | Threshold factor for `stop_on_blowup`. Healthy u_tau fluctuations are a few percent; a blown run doubles. |
 | `t_max` | float | `1000.0` | Simulation-time budget. |
 | `scheme` | `IMEX` | `IMEX` | Only meaningful under `advection.scheme: eulerian`. |
 | `diff_stability_C` | float | `0.2` | Safety factor on the explicit xy-diffusion stability bound. Non-binding at DNS resolutions. |

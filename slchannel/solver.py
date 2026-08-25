@@ -216,6 +216,16 @@ class SLChannelFlow:
         self.dt_max = config["time"].get("dt_max", 0.01)
         self.dt_min = config["time"].get("dt_min", 0.0001)
         self.time_scheme = config["time"].get("scheme", "IMEX")
+        # Blow-up guard: a blown SL run saturates at FINITE amplitude (foot
+        # clamping and the exact flux constraint keep it bounded), so the
+        # NaN check below never fires and the run would integrate a
+        # meaningless state to t_max. Stop instead after three consecutive
+        # diagnostics with u_tau above blowup_u_tau_factor times the
+        # nominal u_tau = Re_tau*nu/delta.
+        self.stop_on_blowup = config["time"].get("stop_on_blowup", True)
+        self.blowup_u_tau_factor = float(config["time"].get("blowup_u_tau_factor", 2.0))
+        self._blowup_strikes = 0
+        self._u_tau_nominal = None  # set in run_simulation (needs delta)
         # Explicit xy-diffusion stability constant: dt <= C / (nu*(1/dx^2+1/dy^2)).
         # Non-binding at channel-DNS resolutions; verified empirically in tests.
         self.diff_stability_C = config["time"].get("diff_stability_C", 0.2)
@@ -1163,6 +1173,16 @@ class SLChannelFlow:
             except Exception as e:
                 print(f"Failed to delete {file_path}. Reason: {e}", flush=True)
 
+    def _blowup_check(self, u_tau):
+        """True once u_tau has exceeded blowup_u_tau_factor * u_tau_nominal
+        on three consecutive diagnostics; a single spike resets nothing a
+        healthy run cannot recover from, so transients do not trigger it."""
+        if self._u_tau_nominal is not None and u_tau > self.blowup_u_tau_factor * self._u_tau_nominal:
+            self._blowup_strikes += 1
+        else:
+            self._blowup_strikes = 0
+        return self._blowup_strikes >= 3
+
     def run_simulation(self):
         """Advance the flow until `time.t_max` or `time.n_steps` is reached.
 
@@ -1208,6 +1228,7 @@ class SLChannelFlow:
 
         delta = self.Lz if self.top_wall_bc_type == "neumann" else self.Lz / 2.0
         u_tau_target = self.Re_tau * self.nu / delta
+        self._u_tau_nominal = u_tau_target
 
         dz_min = torch.min(self.dz_f).item()
         dz_max = torch.max(self.dz_f).item()
@@ -1291,6 +1312,25 @@ class SLChannelFlow:
                 timeseries_data["u_tau"][idx] = u_tau_scalar
                 timeseries_data["forcing"][idx] = forcing_scalar
                 timeseries_data["index"] += 1
+
+                if self.stop_on_blowup and self._blowup_check(u_tau_scalar):
+                    print(f"\n{'=' * 90}", flush=True)
+                    print(
+                        f"BLOW-UP: u_tau = {u_tau_scalar:.4f} > "
+                        f"{self.blowup_u_tau_factor:g} x nominal "
+                        f"{self._u_tau_nominal:.4f} on three consecutive "
+                        f"diagnostics at step {step}, time = {self.time:.6f} "
+                        f"-- stopping (time.stop_on_blowup)",
+                        flush=True,
+                    )
+                    print(f"{'=' * 90}\n", flush=True)
+                    save_flow_fields(
+                        self.u, self.v, self.w, self.p, self.z_c, self.z_f,
+                        self.Lx, self.Ly, step, self.time, u_tau_scalar,
+                        forcing_scalar, self.results_folder, "fields_blowup.npz",
+                    )
+                    print("Blow-up state saved to fields_blowup.npz", flush=True)
+                    break
 
             if self.n_stats > 0 and self.time >= self.t_stats and step % self.n_stats == 0:
                 if step % self.n_out == 0:
