@@ -3,7 +3,7 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project uses [semantic versioning](https://semver.org/).
 
-## [1.0.0] — unreleased
+## [1.0.0] — 2026-08-25
 
 First public release: the version the published results were produced with.
 
@@ -53,3 +53,5 @@ Developed as a fork of the unpublished Eulerian solver torChannel; see
 commit `05a1b30`. Commit `85cb224` removed the experimental time schemes
 (`v1`, `v2`, `pc`) and the C² spline interpolation path after the campaigns
 settled on BDF2 — configs still carrying those keys raise an explanatory error.
+
+[1.0.0]: https://github.com/gmcavallazzi/SLchannel/releases/tag/v1.0.0
