@@ -30,9 +30,18 @@ import triton.language as tl
 
 
 @triton.jit
-def _z_locate(z, znodes, Lz, gamma, tanh_g, nzf,
-              IS_CENTERS: tl.constexpr, IS_SYMMETRIC: tl.constexpr,
-              NZN: tl.constexpr, ORDER: tl.constexpr):
+def _z_locate(
+    z,
+    znodes,
+    Lz,
+    gamma,
+    tanh_g,
+    nzf,
+    IS_CENTERS: tl.constexpr,
+    IS_SYMMETRIC: tl.constexpr,
+    NZN: tl.constexpr,
+    ORDER: tl.constexpr,
+):
     """Base z-node index k0 for the ORDER-point stencil containing z."""
     if IS_SYMMETRIC:
         arg = (2.0 * z / Lz - 1.0) * tanh_g
@@ -45,7 +54,7 @@ def _z_locate(z, znodes, Lz, gamma, tanh_g, nzf,
     else:
         kf = (1.0 - xi) * nzf  # xi here is atanh(...)/gamma of (1 - z/Lz)
     c = tl.math.floor(kf).to(tl.int32)
-    c = tl.minimum(tl.maximum(c, 0), NZN - 2)   # face-interval index
+    c = tl.minimum(tl.maximum(c, 0), NZN - 2)  # face-interval index
     if IS_CENTERS:
         zc1 = tl.load(znodes + c + 1)
         m0 = c + (z >= zc1).to(tl.int32)
@@ -62,11 +71,28 @@ def _wrap(i, N: tl.constexpr):
 
 
 @triton.jit
-def _trilinear(F, x, y, z, znodes,
-               inv_dx, shift_x, inv_dy, shift_y,
-               Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-               NX: tl.constexpr, NY: tl.constexpr, NZ: tl.constexpr,
-               IS_CENTERS: tl.constexpr, IS_SYMMETRIC: tl.constexpr):
+def _trilinear(
+    F,
+    x,
+    y,
+    z,
+    znodes,
+    inv_dx,
+    shift_x,
+    inv_dy,
+    shift_y,
+    Lz,
+    gamma,
+    tanh_g,
+    nzf,
+    z_lo,
+    z_hi,
+    NX: tl.constexpr,
+    NY: tl.constexpr,
+    NZ: tl.constexpr,
+    IS_CENTERS: tl.constexpr,
+    IS_SYMMETRIC: tl.constexpr,
+):
     """Trilinear sample of one node buffer at arbitrary points (registers only)."""
     z = tl.minimum(tl.maximum(z, z_lo), z_hi)
     sx = x * inv_dx + shift_x
@@ -75,8 +101,7 @@ def _trilinear(F, x, y, z, znodes,
     sy = y * inv_dy + shift_y
     iy0 = tl.math.floor(sy).to(tl.int32)
     tyf = sy - iy0
-    k0 = _z_locate(z, znodes, Lz, gamma, tanh_g, nzf,
-                   IS_CENTERS, IS_SYMMETRIC, NZ, 2)
+    k0 = _z_locate(z, znodes, Lz, gamma, tanh_g, nzf, IS_CENTERS, IS_SYMMETRIC, NZ, 2)
     z0 = tl.load(znodes + k0)
     z1 = tl.load(znodes + k0 + 1)
     tz = (z - z0) / (z1 - z0)
@@ -86,26 +111,50 @@ def _trilinear(F, x, y, z, znodes,
     iy_a = _wrap(iy0, NY) * NZ
     iy_b = _wrap(iy0 + 1, NY) * NZ
 
-    acc = (1 - txf) * ((1 - tyf) * ((1 - tz) * tl.load(F + ix_a + iy_a + k0)
-                                    + tz * tl.load(F + ix_a + iy_a + k0 + 1))
-                       + tyf * ((1 - tz) * tl.load(F + ix_a + iy_b + k0)
-                                + tz * tl.load(F + ix_a + iy_b + k0 + 1))) \
-        + txf * ((1 - tyf) * ((1 - tz) * tl.load(F + ix_b + iy_a + k0)
-                              + tz * tl.load(F + ix_b + iy_a + k0 + 1))
-                 + tyf * ((1 - tz) * tl.load(F + ix_b + iy_b + k0)
-                          + tz * tl.load(F + ix_b + iy_b + k0 + 1)))
+    acc = (1 - txf) * (
+        (1 - tyf)
+        * ((1 - tz) * tl.load(F + ix_a + iy_a + k0) + tz * tl.load(F + ix_a + iy_a + k0 + 1))
+        + tyf * ((1 - tz) * tl.load(F + ix_a + iy_b + k0) + tz * tl.load(F + ix_a + iy_b + k0 + 1))
+    ) + txf * (
+        (1 - tyf)
+        * ((1 - tz) * tl.load(F + ix_b + iy_a + k0) + tz * tl.load(F + ix_b + iy_a + k0 + 1))
+        + tyf * ((1 - tz) * tl.load(F + ix_b + iy_b + k0) + tz * tl.load(F + ix_b + iy_b + k0 + 1))
+    )
     return acc
 
 
 @triton.jit
-def _departure_kernel(FU, FV, FW, zc, zf,
-                      XD, YD, ZD, NCLAMP,
-                      dt, dx, dy, Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                      N, NYI: tl.constexpr, NZI: tl.constexpr,
-                      NX: tl.constexpr, NY: tl.constexpr,
-                      NZC: tl.constexpr, NZF: tl.constexpr,
-                      COMP: tl.constexpr, N_ITERS: tl.constexpr,
-                      IS_SYMMETRIC: tl.constexpr, BLOCK: tl.constexpr):
+def _departure_kernel(
+    FU,
+    FV,
+    FW,
+    zc,
+    zf,
+    XD,
+    YD,
+    ZD,
+    NCLAMP,
+    dt,
+    dx,
+    dy,
+    Lz,
+    gamma,
+    tanh_g,
+    nzf,
+    z_lo,
+    z_hi,
+    N,
+    NYI: tl.constexpr,
+    NZI: tl.constexpr,
+    NX: tl.constexpr,
+    NY: tl.constexpr,
+    NZC: tl.constexpr,
+    NZF: tl.constexpr,
+    COMP: tl.constexpr,
+    N_ITERS: tl.constexpr,
+    IS_SYMMETRIC: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < N
@@ -117,15 +166,15 @@ def _departure_kernel(FU, FV, FW, zc, zf,
 
     fi = i.to(tl.float32)
     fj = j.to(tl.float32)
-    if COMP == 0:      # u: x-faces, y centers, z centers
+    if COMP == 0:  # u: x-faces, y centers, z centers
         xa = (fi + 1.0) * dx
         ya = (fj + 0.5) * dy
         za = tl.load(zc + k + 1, mask=mask, other=0.5)
-    elif COMP == 1:    # v: x centers, y-faces, z centers
+    elif COMP == 1:  # v: x centers, y-faces, z centers
         xa = (fi + 0.5) * dx
         ya = (fj + 1.0) * dy
         za = tl.load(zc + k + 1, mask=mask, other=0.5)
-    else:              # w: x centers, y centers, interior z faces
+    else:  # w: x centers, y centers, interior z faces
         xa = (fi + 0.5) * dx
         ya = (fj + 0.5) * dy
         za = tl.load(zf + k + 1, mask=mask, other=0.5)
@@ -138,15 +187,72 @@ def _departure_kernel(FU, FV, FW, zc, zf,
     ym = ya
     zm = za
     for _ in tl.static_range(N_ITERS):
-        us = _trilinear(FU, xm, ym, zm, zc, inv_dx, 0.0, inv_dy, -0.5,
-                        Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                        NX, NY, NZC, True, IS_SYMMETRIC)
-        vs = _trilinear(FV, xm, ym, zm, zc, inv_dx, -0.5, inv_dy, 0.0,
-                        Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                        NX, NY, NZC, True, IS_SYMMETRIC)
-        ws = _trilinear(FW, xm, ym, zm, zf, inv_dx, -0.5, inv_dy, -0.5,
-                        Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                        NX, NY, NZF, False, IS_SYMMETRIC)
+        us = _trilinear(
+            FU,
+            xm,
+            ym,
+            zm,
+            zc,
+            inv_dx,
+            0.0,
+            inv_dy,
+            -0.5,
+            Lz,
+            gamma,
+            tanh_g,
+            nzf,
+            z_lo,
+            z_hi,
+            NX,
+            NY,
+            NZC,
+            True,
+            IS_SYMMETRIC,
+        )
+        vs = _trilinear(
+            FV,
+            xm,
+            ym,
+            zm,
+            zc,
+            inv_dx,
+            -0.5,
+            inv_dy,
+            0.0,
+            Lz,
+            gamma,
+            tanh_g,
+            nzf,
+            z_lo,
+            z_hi,
+            NX,
+            NY,
+            NZC,
+            True,
+            IS_SYMMETRIC,
+        )
+        ws = _trilinear(
+            FW,
+            xm,
+            ym,
+            zm,
+            zf,
+            inv_dx,
+            -0.5,
+            inv_dy,
+            -0.5,
+            Lz,
+            gamma,
+            tanh_g,
+            nzf,
+            z_lo,
+            z_hi,
+            NX,
+            NY,
+            NZF,
+            False,
+            IS_SYMMETRIC,
+        )
         xm = xa - half_dt * us
         ym = ya - half_dt * vs
         zm = tl.minimum(tl.maximum(za - half_dt * ws, z_lo), z_hi)
@@ -165,13 +271,34 @@ def _departure_kernel(FU, FV, FW, zc, zf,
 
 
 @triton.jit
-def _gather_kernel(F, XD, YD, ZD, OUT,
-                   znodes, dinv, udenom,
-                   dx, dy, shift_x, shift_y,
-                   Lz, gamma, tanh_g, nzf, z_lo, z_hi,
-                   N, NX: tl.constexpr, NY: tl.constexpr, NZ: tl.constexpr,
-                   IS_CENTERS: tl.constexpr, IS_SYMMETRIC: tl.constexpr,
-                   ORDER: tl.constexpr, BLOCK: tl.constexpr):
+def _gather_kernel(
+    F,
+    XD,
+    YD,
+    ZD,
+    OUT,
+    znodes,
+    dinv,
+    udenom,
+    dx,
+    dy,
+    shift_x,
+    shift_y,
+    Lz,
+    gamma,
+    tanh_g,
+    nzf,
+    z_lo,
+    z_hi,
+    N,
+    NX: tl.constexpr,
+    NY: tl.constexpr,
+    NZ: tl.constexpr,
+    IS_CENTERS: tl.constexpr,
+    IS_SYMMETRIC: tl.constexpr,
+    ORDER: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < N
@@ -188,8 +315,7 @@ def _gather_kernel(F, XD, YD, ZD, OUT,
     iy0 = tl.math.floor(sy).to(tl.int32)
     tyf = sy - iy0
 
-    k0 = _z_locate(z, znodes, Lz, gamma, tanh_g, nzf,
-                   IS_CENTERS, IS_SYMMETRIC, NZ, ORDER)
+    k0 = _z_locate(z, znodes, Lz, gamma, tanh_g, nzf, IS_CENTERS, IS_SYMMETRIC, NZ, ORDER)
 
     acc = tl.zeros([BLOCK], dtype=tl.float32)
     for ii in tl.static_range(ORDER):
@@ -231,13 +357,19 @@ class TritonSL:
         # flat inverse-denominator tables and uniform inverse denominators
         self.dinv = {}
         self.udenom = {}
-        from semilag import _z_denominator_table, _uniform_inv_denominators
-        for comp in 'uvw':
+        from .semilag import _uniform_inv_denominators, _z_denominator_table
+
+        for comp in "uvw":
             spec = adv.spec[comp]
-            self.dinv[comp] = _z_denominator_table(
-                spec.znodes.double(), adv.order).to(torch.float32).contiguous().reshape(-1)
+            self.dinv[comp] = (
+                _z_denominator_table(spec.znodes.double(), adv.order)
+                .to(torch.float32)
+                .contiguous()
+                .reshape(-1)
+            )
         self.udenom[adv.order] = torch.tensor(
-            _uniform_inv_denominators(adv.order), dtype=torch.float32, device=dev)
+            _uniform_inv_denominators(adv.order), dtype=torch.float32, device=dev
+        )
         # departure coordinate buffers (shared across components: sized for
         # the largest interior; w uses a prefix)
         n_max = adv.nx * adv.ny * adv.nz
@@ -245,23 +377,46 @@ class TritonSL:
         self.yd = torch.empty(n_max, dtype=torch.float32, device=dev)
         self.zd = torch.empty(n_max, dtype=torch.float32, device=dev)
         self.nclamp = torch.zeros(1, dtype=torch.int32, device=dev)
-        self.out = {c: torch.empty(adv.arrival[c][3], dtype=torch.float32, device=dev)
-                    for c in 'uvw'}
+        self.out = {
+            c: torch.empty(adv.arrival[c][3], dtype=torch.float32, device=dev) for c in "uvw"
+        }
 
     def departure(self, comp, dt):
         adv = self.adv
-        nzi = adv.nz if comp != 'w' else adv.nz - 1
+        nzi = adv.nz if comp != "w" else adv.nz - 1
         n = adv.nx * adv.ny * nzi
         grid = (triton.cdiv(n, self.BLOCK),)
         _departure_kernel[grid](
-            adv.mbuf['u'], adv.mbuf['v'], adv.mbuf['w'], self.zc32, self.zf32,
-            self.xd, self.yd, self.zd, self.nclamp,
-            float(dt), adv.dx, adv.dy, adv.Lz, adv.gamma, adv._tanh_g,
-            float(adv.nz), adv.z_lo, adv.z_hi,
-            n, adv.ny, nzi,
-            adv.nx, adv.ny, adv.nz + 2, adv.nz + 1,
-            'uvw'.index(comp), adv.n_traj_iters,
-            adv.stretching_type == 'symmetric', self.BLOCK)
+            adv.mbuf["u"],
+            adv.mbuf["v"],
+            adv.mbuf["w"],
+            self.zc32,
+            self.zf32,
+            self.xd,
+            self.yd,
+            self.zd,
+            self.nclamp,
+            float(dt),
+            adv.dx,
+            adv.dy,
+            adv.Lz,
+            adv.gamma,
+            adv._tanh_g,
+            float(adv.nz),
+            adv.z_lo,
+            adv.z_hi,
+            n,
+            adv.ny,
+            nzi,
+            adv.nx,
+            adv.ny,
+            adv.nz + 2,
+            adv.nz + 1,
+            "uvw".index(comp),
+            adv.n_traj_iters,
+            adv.stretching_type == "symmetric",
+            self.BLOCK,
+        )
         return n
 
     def gather(self, comp, buf, n):
@@ -270,12 +425,31 @@ class TritonSL:
         grid = (triton.cdiv(n, self.BLOCK),)
         out = self.out[comp].reshape(-1)
         _gather_kernel[grid](
-            buf.reshape(-1), self.xd, self.yd, self.zd, out,
+            buf.reshape(-1),
+            self.xd,
+            self.yd,
+            self.zd,
+            out,
             spec.znodes.to(torch.float32) if spec.znodes.dtype != torch.float32 else spec.znodes,
-            self.dinv[comp], self.udenom[adv.order],
-            adv.dx, adv.dy, spec.shift_x, spec.shift_y,
-            adv.Lz, adv.gamma, adv._tanh_g, float(adv.nz), adv.z_lo, adv.z_hi,
-            n, spec.NX, spec.NY, spec.NZ,
-            spec.ztype == 'centers', adv.stretching_type == 'symmetric',
-            adv.order, self.BLOCK)
+            self.dinv[comp],
+            self.udenom[adv.order],
+            adv.dx,
+            adv.dy,
+            spec.shift_x,
+            spec.shift_y,
+            adv.Lz,
+            adv.gamma,
+            adv._tanh_g,
+            float(adv.nz),
+            adv.z_lo,
+            adv.z_hi,
+            n,
+            spec.NX,
+            spec.NY,
+            spec.NZ,
+            spec.ztype == "centers",
+            adv.stretching_type == "symmetric",
+            adv.order,
+            self.BLOCK,
+        )
         return self.out[comp]

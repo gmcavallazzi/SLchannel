@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slchannel"
+dynamic = ["version"]
+description = "Semi-Lagrangian DNS of turbulent channel flow on the GPU"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Giorgio Cavallazzi", email = "gio.cava10@gmail.com" }]
+keywords = [
+    "computational-fluid-dynamics", "direct-numerical-simulation",
+    "semi-lagrangian", "turbulence", "channel-flow", "pytorch",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "matplotlib>=3.6",
+]
+
+[project.optional-dependencies]
+# `triton` is NOT declared as a dependency on purpose: PyTorch's Linux CUDA
+# wheels already bundle it, and pinning it here can fight pip's resolver on a
+# CUDA install while being meaningless on macOS/Windows. Without it the solver
+# falls back to torch.compile/eager and says so.
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[project.scripts]
+slchannel = "slchannel.cli:main"
+
+[project.urls]
+Source = "https://github.com/gmcavallazzi/SLchannel"
+
+[tool.setuptools]
+packages = ["slchannel"]
+
+[tool.setuptools.dynamic]
+version = { attr = "slchannel.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: runs a few thousand solver steps (minutes, not seconds)",
+    "gpu: requires CUDA (and, for the Triton paths, a working triton install)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E741"]
+
+[tool.ruff.format]
+# Same reason: never reformat the inherited modules.
+exclude = [
+    "slchannel/operators.py", "slchannel/utils.py", "slchannel/initflow.py",
+    "slchannel/turbstats.py", "slchannel/tridiag.py", "slchannel/projection.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Modules inherited verbatim from the parent solver torChannel (see
+# docs/PROVENANCE.md). They are kept diffable against upstream, so style-only
+# rules are waived -- reformatting them would make "imported verbatim" false.
+# Correctness rules (F821 undefined name, F811 redefinition) still apply; only
+# the stylistic F401/F841 are waived alongside E/W/I.
+"slchannel/operators.py" = ["E", "W", "I", "F401", "F841", "F541"]
+"slchannel/utils.py" = ["E", "W", "I", "F401", "F841", "F541"]
+"slchannel/initflow.py" = ["E", "W", "I", "F401", "F841", "F541"]
+"slchannel/turbstats.py" = ["E", "W", "I", "F401", "F841", "F541"]
+"slchannel/tridiag.py" = ["E", "W", "I", "F401", "F841", "F541"]
+"slchannel/projection.py" = ["E", "W", "I", "F401", "F841", "F541"]

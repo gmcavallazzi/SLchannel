@@ -1,3 +1,24 @@
+"""projection.py — pressure projection on the staggered channel grid.
+
+Two halves of one operation:
+
+* ``initialize_fft_solver`` / ``solve_poisson_fft`` solve the pressure Poisson
+  equation. x and y are periodic, so a 2-D FFT diagonalises them and each
+  (kx, ky) mode reduces to a tridiagonal solve in the stretched z direction.
+  The singular (kx=0, ky=0) Neumann-Neumann mode is pinned explicitly -- a
+  local fix relative to the parent solver.
+* ``project_velocity`` applies the resulting correction u <- u* - dt grad(p),
+  which is what makes the velocity field discretely divergence-free.
+
+Provenance
+----------
+Inherited from torChannel (same author, MIT), imported verbatim in slChannel
+commit 05a1b30. ``project_velocity`` was merged in from the former
+``projection.py`` when the dense direct Poisson path was removed; nothing else
+was changed, and the file is deliberately NOT reformatted so it stays diffable
+against upstream. See docs/PROVENANCE.md.
+"""
+
 import torch
 
 def initialize_fft_solver(nx, ny, nz, dx, dy, dz_c, dz_f, top_wall_bc_type='dirichlet'):
@@ -224,3 +245,28 @@ def solve_tridiagonal(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
         x[:, i] = d_prime[:, i] - c_prime[:, i] * x[:, i+1]
 
     return x
+
+
+@torch.jit.script
+def project_velocity(u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
+                     p: torch.Tensor, nx: int, ny: int, nz: int,
+                     dx: float, dy: float, dz_c: torch.Tensor, dz_f: torch.Tensor,
+                     dt: float):
+    """
+    Velocity correction: u = u* - dt*grad(p)
+    JIT-compiled for GPU performance
+    NOTE: Must use same grid spacing as compute_divergence for consistency
+    """
+    # Vectorized correction for u (x-faces) - GPU compatible
+    dp_dx = (p[2:nx+2, 1:ny+1, 1:nz+1] - p[1:nx+1, 1:ny+1, 1:nz+1]) / dx
+    u[1:nx+1, 1:ny+1, 1:nz+1] -= dt * dp_dx
+
+    # Vectorized correction for v (y-faces)
+    dp_dy = (p[1:nx+1, 2:ny+2, 1:nz+1] - p[1:nx+1, 1:ny+1, 1:nz+1]) / dy
+    v[1:nx+1, 1:ny+1, 1:nz+1] -= dt * dp_dy
+
+    # Vectorized correction for w (z-faces)
+    dp_dz = (p[1:nx+1, 1:ny+1, 2:nz+1] - p[1:nx+1, 1:ny+1, 1:nz]) / dz_c[1:nz].view(1, 1, -1)
+    w[1:nx+1, 1:ny+1, 1:nz] -= dt * dp_dz
+
+    return u, v, w

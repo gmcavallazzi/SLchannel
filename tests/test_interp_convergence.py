@@ -3,33 +3,31 @@ O(h^4) for tricubic (order=4) and O(h^6) for triquintic (order=6), measured on
 the u-component node grid (uniform x,y + tanh-stretched z with nonuniform-node
 weights, one-sided stencils at the walls)."""
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 import math
-import torch
-from utils import generate_grid
-from semilag import SLAdvector, _gather_interp
-from _slhelpers import report
 
-torch.set_default_dtype(torch.float64)
+import torch
+
+from slchannel.semilag import SLAdvector
+from slchannel.utils import generate_grid
 
 Lx, Ly, Lz = 2 * math.pi, 2 * math.pi, 2.0
 GAMMA = 1.8
 
 
 def f(x, y, z):
-    return (torch.sin(2 * math.pi * x / Lx + 0.3)
-            * torch.cos(4 * math.pi * y / Ly - 1.1)
-            * torch.sin(1.5 * math.pi * z / Lz + 0.4))
+    return (
+        torch.sin(2 * math.pi * x / Lx + 0.3)
+        * torch.cos(4 * math.pi * y / Ly - 1.1)
+        * torch.sin(1.5 * math.pi * z / Lz + 0.4)
+    )
 
 
 def max_interp_error(n, order):
     nx = ny = nz = n
     dx, dy = Lx / nx, Ly / ny
-    z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type='symmetric')
+    z_f, z_c, _, _ = generate_grid(GAMMA, nz, Lz, stretching_type="symmetric")
     adv = SLAdvector(nx, ny, nz, dx, dy, Lx, Ly, Lz, z_f, z_c, GAMMA, order=order)
-    spec = adv.spec['u']
+    spec = adv.spec["u"]
 
     # node values on the u grid (x faces, y centers, z centers incl. ghosts)
     xg = (torch.arange(nx, dtype=torch.float64) * dx).view(-1, 1, 1)
@@ -49,17 +47,13 @@ def max_interp_error(n, order):
     return (vals - f(xq, yq, zq)).abs().max().item()
 
 
-def run():
-    ok = True
+def test_interp_convergence(check):
     for order, min_ratio in [(4, 10.0), (6, 40.0)]:
         errs = [max_interp_error(n, order) for n in (32, 64, 128)]
         r1, r2 = errs[0] / errs[1], errs[1] / errs[2]
-        ideal = 2 ** order
-        ok &= report(f"interp order={order}",
-                     r1 > min_ratio and r2 > min_ratio,
-                     f"errors={[f'{e:.3e}' for e in errs]} ratios={r1:.1f},{r2:.1f} (ideal {ideal})")
-    return ok
-
-
-if __name__ == "__main__":
-    sys.exit(0 if run() else 1)
+        ideal = 2**order
+        check(
+            f"interp order={order}",
+            r1 > min_ratio and r2 > min_ratio,
+            f"errors={[f'{e:.3e}' for e in errs]} ratios={r1:.1f},{r2:.1f} (ideal {ideal})",
+        )

@@ -1,5 +1,20 @@
+"""initflow.py — Initial conditions.
+
+Vortex-perturbed and parabolic initial fields, restart from a stored field,
+and interpolation of a stored field onto a different grid.
+
+Provenance
+----------
+Inherited from torChannel, the Eulerian parent solver by the same author
+(MIT), imported verbatim in slChannel commit 05a1b30 and kept conceptually
+in sync since. Changes here are limited to package-relative imports, the
+removal of code paths slChannel does not use, and the local divergences
+noted above. Deliberately NOT reformatted, so it stays diffable against
+upstream. See docs/PROVENANCE.md.
+"""
+
 import torch
-from utils import load_flow_fields
+from .utils import load_flow_fields
 
 
 def _interp1d_weights(coords, nodes):

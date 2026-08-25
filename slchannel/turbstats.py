@@ -1,3 +1,19 @@
+"""turbstats.py — On-the-fly turbulence statistics.
+
+Mean and rms profiles, Reynolds stresses and 2-D spectra, accumulated during
+the run. Local divergence from upstream: stresses are taken about the TIME
+mean at each component's own staggered nodes, not the instantaneous plane mean.
+
+Provenance
+----------
+Inherited from torChannel, the Eulerian parent solver by the same author
+(MIT), imported verbatim in slChannel commit 05a1b30 and kept conceptually
+in sync since. Changes here are limited to package-relative imports, the
+removal of code paths slChannel does not use, and the local divergences
+noted above. Deliberately NOT reformatted, so it stays diffable against
+upstream. See docs/PROVENANCE.md.
+"""
+
 import os
 import torch
 import numpy as np
@@ -526,138 +542,3 @@ class TurbulenceStats:
         print(f"  Restored state with {self.n_samples} accumulated samples", flush=True)
 
 
-def compute_statistics_from_snapshot(field_file, config_file, output_file, overrides=None):
-    """
-    Compute turbulence statistics from a single snapshot (for testing).
-
-    Args:
-        field_file: Path to field snapshot (.npz file)
-        config_file: Path to configuration file (.yaml)
-        output_file: Path to save computed statistics (.npz)
-        overrides: Optional dictionary of parameter overrides (e.g., {'Re': 5000, 'Re_tau': 180})
-
-    Returns:
-        Dictionary of computed statistics
-    """
-    import yaml
-    from utils import load_flow_fields, compute_u_tau
-
-    print("="*80)
-    print("Computing statistics from single snapshot")
-    print("="*80)
-
-    # Load configuration
-    with open(config_file, 'r') as f:
-        config = yaml.safe_load(f)
-
-    # Apply overrides if provided
-    if overrides is not None:
-        if 'Re' in overrides:
-            config['flow']['Re'] = overrides['Re']
-            print(f"  Override: Re = {overrides['Re']:.1f} (nu = {1.0/overrides['Re']:.6e})")
-        if 'Re_tau' in overrides:
-            config['flow']['Re_tau'] = overrides['Re_tau']
-            print(f"  Override: Re_tau = {overrides['Re_tau']:.1f}")
-
-    # Extract flow parameters
-    nu = 1.0 / config['flow']['Re']
-    Re_tau_target = config['flow']['Re_tau']
-
-    # Device setup
-    device_config = config.get('compute', {}).get('device', 'auto')
-    if device_config == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    elif device_config == 'cuda':
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA requested but not available")
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-
-    print(f"\nDevice: {device}")
-
-    # Load flow fields (includes grid information)
-    print(f"\nLoading flow fields from: {field_file}")
-    fields = load_flow_fields(field_file, device=device)
-
-    u = fields['u']
-    v = fields['v']
-    w = fields['w']
-
-    # Extract grid from field file (contains the actual stretched grid used)
-    z_c = fields['z_c']
-    z_f = fields['z_f']
-    Lx = fields['Lx']
-    Ly = fields['Ly']
-
-    # Infer grid dimensions from field shapes
-    # u: (nx+1, ny+2, nz+2), v: (nx+2, ny+1, nz+2), w: (nx+2, ny+2, nz+1)
-    nx = u.shape[0] - 1
-    ny = u.shape[1] - 2
-    nz = w.shape[2] - 1
-
-    print(f"  Inferred grid dimensions from field shapes:")
-    print(f"    u.shape = {u.shape} -> nx = {nx}")
-    print(f"    v.shape = {v.shape} -> ny = {ny}")
-    print(f"    w.shape = {w.shape} -> nz = {nz}")
-
-    # Compute grid spacings (dz_c, dz_f)
-    # z_c includes ghost cells, so interior is z_c[1:nz+1]
-    # z_f has nz+1 face locations
-    dz_f = z_f[1:] - z_f[:-1]  # Length nz
-    dz_c = z_c[1:] - z_c[:-1]  # Length nz+1
-
-    # Compute dx, dy
-    dx = Lx / nx
-    dy = Ly / ny
-
-    # Update Lz from grid
-    Lz = z_f[-1].item()
-
-    print(f"  Loaded from step {fields['step']}, time = {fields['time']:.6f}")
-    print(f"  Grid: nx={nx}, ny={ny}, nz={nz}")
-    print(f"  Domain: Lx={Lx:.4f}, Ly={Ly:.4f}, Lz={Lz:.4f}")
-    print(f"  z-grid: stretched, z_min={z_f[0]:.6f}, z_max={z_f[-1]:.6f}")
-    print(f"  Grid spacings: dx={dx:.6f}, dy={dy:.6f}, dz_min={dz_f.min():.6f}, dz_max={dz_f.max():.6f}")
-
-    # Compute u_tau
-    u_tau = compute_u_tau(u, z_c, nu)
-    print(f"  u_tau = {u_tau:.6e}")
-
-    # Initialize statistics accumulator
-    z_plus_target = config.get('statistics', {}).get('z_plus_target', 15.0)
-
-    stats_computer = TurbulenceStats(
-        nx, ny, nz, Lx, Ly, Lz, z_c, z_f, dz_c, dz_f, dx, dy, nu,
-        Re_tau_target, z_plus_target=z_plus_target, device=device
-    )
-
-    # Accumulate statistics from this single snapshot
-    print("\nComputing statistics...")
-    stats_computer.accumulate_statistics(u, v, w, u_tau)
-
-    # Finalize and save
-    stats = stats_computer.finalize_statistics()
-
-    np.savez_compressed(output_file, **stats)
-    print(f"\nStatistics saved to: {output_file}")
-
-    # Print summary
-    print("\n" + "="*80)
-    print("SUMMARY")
-    print("="*80)
-    print(f"Mean velocity profile U(z):")
-    print(f"  min = {stats['U_mean'].min():.6e}, max = {stats['U_mean'].max():.6e}")
-    print(f"\nReynolds stresses:")
-    print(f"  u'u': min = {stats['uu_mean'].min():.6e}, max = {stats['uu_mean'].max():.6e}")
-    print(f"  v'v': min = {stats['vv_mean'].min():.6e}, max = {stats['vv_mean'].max():.6e}")
-    print(f"  w'w': min = {stats['ww_mean'].min():.6e}, max = {stats['ww_mean'].max():.6e}")
-    print(f"  u'w': min = {stats['uw_mean'].min():.6e}, max = {stats['uw_mean'].max():.6e}")
-    print(f"\n2D Energy spectra at z+ ≈ {z_plus_target}:")
-    print(f"  E_uu: min = {stats['E_uu_2d'].min():.6e}, max = {stats['E_uu_2d'].max():.6e}")
-    print(f"  E_vv: min = {stats['E_vv_2d'].min():.6e}, max = {stats['E_vv_2d'].max():.6e}")
-    print(f"  E_ww: min = {stats['E_ww_2d'].min():.6e}, max = {stats['E_ww_2d'].max():.6e}")
-    print(f"  E_uw: min = {stats['E_uw_2d'].min():.6e}, max = {stats['E_uw_2d'].max():.6e}")
-    print("="*80)
-
-    return stats

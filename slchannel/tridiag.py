@@ -13,6 +13,9 @@ depend on d, so 1-D diagonals stay 1-D throughout (cheaper).
 
 PCR is stable for the diagonally dominant systems here (implicit diffusion and
 the FFT-Poisson z-operator).
+
+Provenance: inherited from torChannel (same author, MIT), imported verbatim in
+slChannel commit 05a1b30. Deliberately NOT reformatted. See docs/PROVENANCE.md.
 """
 import torch
 

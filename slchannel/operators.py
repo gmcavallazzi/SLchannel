@@ -1,5 +1,22 @@
+"""operators.py — Staggered-MAC finite-difference operators.
+
+Advection and diffusion stencils, the fused IMEX momentum RHS, the CFL
+reduction, and the Crank-Nicolson implicit z-diffusion solves. Used by the
+Eulerian reference scheme and, for the diffusion half, by the SL scheme too.
+
+Provenance
+----------
+Inherited from torChannel, the Eulerian parent solver by the same author
+(MIT), imported verbatim in slChannel commit 05a1b30 and kept conceptually
+in sync since. Changes here are limited to package-relative imports, the
+removal of code paths slChannel does not use, and the local divergences
+noted above. Deliberately NOT reformatted, so it stays diffable against
+upstream. See docs/PROVENANCE.md.
+"""
+
 import torch
-from tridiag import pcr_solve
+from .tridiag import pcr_solve
+from . import env
 
 """
 Staggered grid operators for incompressible Navier-Stokes equations.
@@ -262,224 +279,11 @@ def advection_w(u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
     return adv_w
 
 
-def advection_all_components(u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
-                              nx: int, ny: int, nz: int,
-                              dx: float, dy: float, dz_c: torch.Tensor, dz_f: torch.Tensor) -> tuple:
-    """
-    Compute advection terms for all velocity components in a single call.
-    Reduces function call overhead compared to calling advection_u/v/w separately.
-
-    Returns:
-        tuple: (adv_u, adv_v, adv_w) - advection terms for each velocity component
-    """
-    adv_u = advection_u(u, v, w, nx, ny, nz, dx, dy, dz_f)
-    adv_v = advection_v(u, v, w, nx, ny, nz, dx, dy, dz_f)
-    adv_w = advection_w(u, v, w, nx, ny, nz, dx, dy, dz_c)
-    return adv_u, adv_v, adv_w
-
-
 import torch
 
 # ==============================================================================
 # FUSED KERNEL (GPU Optimization - Phase 3)
 # ==============================================================================
-
-@torch.jit.script
-def compute_momentum_rhs_fused(
-    u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
-    nx: int, ny: int, nz: int,
-    dx: float, dy: float, 
-    dz_c: torch.Tensor, dz_f: torch.Tensor,
-    nu: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Compute momentum RHS combining advection + diffusion in single pass.
-    GPU-optimized fused kernel to reduce memory bandwidth.
-    
-    Returns: (rhs_u, rhs_v, rhs_w) = advection + diffusion for each component
-    
-    Performance: 15-25% faster than separate calls by reducing intermediate
-    tensor allocations and memory transfers.
-    """
-    # Allocate output tensors
-    rhs_u = torch.zeros_like(u)
-    rhs_v = torch.zeros_like(v)
-    rhs_w = torch.zeros_like(w)
-    
-    # ==================================================================
-    # U-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-    
-    # --- Advection term for u: d(uu)/dx + d(vu)/dy + d(wu)/dz ---
-    # d(uu)/dx
-    u_interp = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[2:nx+1, 1:ny+1, 1:nz+1])
-    uu_right = u_interp * u_interp
-    u_interp = 0.5 * (u[0:nx-1, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
-    uu_left = u_interp * u_interp
-    duudx = (uu_right - uu_left) / dx
-
-    # d(vu)/dy
-    v_interp = 0.5 * (v[1:nx, 1:ny+1, 1:nz+1] + v[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 2:ny+2, 1:nz+1])
-    vu_top = v_interp * u_interp_y
-    v_interp = 0.5 * (v[1:nx, 0:ny, 1:nz+1] + v[2:nx+1, 0:ny, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 0:ny, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
-    vu_bottom = v_interp * u_interp_y
-    dvudy = (vu_top - vu_bottom) / dy
-
-    # d(wu)/dz
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 1:nz+1] + w[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 2:nz+2])
-    wu_top = w_interp * u_interp_z
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 0:nz] + w[2:nx+1, 1:ny+1, 0:nz])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 0:nz] + u[1:nx, 1:ny+1, 1:nz+1])
-    wu_bottom = w_interp * u_interp_z
-    dz_avg = dz_f[0:nz].view(1, 1, -1)
-    dwudz = (wu_top - wu_bottom) / dz_avg
-
-    adv_u_term = duudx + dvudy + dwudz
-
-    # --- Diffusion term for u: nu * laplacian(u) ---
-    # d2u/dx2
-    u_ext_x = torch.cat([u, u[1:2, :, :]], dim=0)
-    d2u_dx2 = (u_ext_x[2:nx+2, 1:ny+1, 1:nz+1] -
-               2*u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] +
-               u_ext_x[0:nx, 1:ny+1, 1:nz+1]) / (dx**2)
-
-    # d2u/dy2
-    d2u_dy2 = (u[1:nx+1, 2:ny+2, 1:nz+1] -
-               2*u[1:nx+1, 1:ny+1, 1:nz+1] +
-               u[1:nx+1, 0:ny, 1:nz+1]) / (dy**2)
-
-    # d2u/dz2 (non-uniform grid)
-    dz_left = dz_c[0:nz].view(1, 1, -1)
-    dz_right = dz_c[1:nz+1].view(1, 1, -1)
-    dz_cell = dz_f.view(1, 1, -1)
-    d2u_dz2 = ((u[1:nx+1, 1:ny+1, 2:nz+2] -
-                u[1:nx+1, 1:ny+1, 1:nz+1])/dz_right -
-               (u[1:nx+1, 1:ny+1, 1:nz+1] -
-                u[1:nx+1, 1:ny+1, 0:nz])/dz_left) / dz_cell
-
-    diff_u_term = nu * (d2u_dx2 + d2u_dy2 + d2u_dz2)
-
-    # Combine: RHS = advection + diffusion
-    rhs_u[1:nx, 1:ny+1, 1:nz+1] = adv_u_term + diff_u_term[0:nx-1, :, :]
-    
-    # ==================================================================
-    # V-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-    
-    # --- Advection term for v ---
-    # d(uv)/dx
-    u_interp = 0.5 * (u[1:nx+1, 1:ny, 1:nz+1] + u[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[2:nx+2, 1:ny, 1:nz+1])
-    uv_right = u_interp * v_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny, 1:nz+1] + u[0:nx, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[0:nx, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
-    uv_left = u_interp * v_interp_x
-    duvdx = (uv_right - uv_left) / dx
-
-    # d(vv)/dy
-    v_interp = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 2:ny+1, 1:nz+1])
-    vv_top = v_interp * v_interp
-    v_interp = 0.5 * (v[1:nx+1, 0:ny-1, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
-    vv_bottom = v_interp * v_interp
-    dvvdy = (vv_top - vv_bottom) / dy
-
-    # d(wv)/dz
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 1:nz+1] + w[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 2:nz+2])
-    wv_top = w_interp * v_interp_z
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 0:nz] + w[1:nx+1, 2:ny+1, 0:nz])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 0:nz] + v[1:nx+1, 1:ny, 1:nz+1])
-    wv_bottom = w_interp * v_interp_z
-    dz_avg = dz_f[0:nz].view(1, 1, -1)
-    dwvdz = (wv_top - wv_bottom) / dz_avg
-
-    adv_v_term = duvdx + dvvdy + dwvdz
-
-    # --- Diffusion term for v ---
-    # d2v/dx2
-    d2v_dx2 = (v[2:nx+2, 1:ny+1, 1:nz+1] -
-               2*v[1:nx+1, 1:ny+1, 1:nz+1] +
-               v[0:nx, 1:ny+1, 1:nz+1]) / (dx**2)
-
-    # d2v/dy2
-    v_ext_y = torch.cat([v, v[:, 1:2, :]], dim=1)
-    d2v_dy2 = (v_ext_y[1:nx+1, 2:ny+2, 1:nz+1] -
-               2*v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] +
-               v_ext_y[1:nx+1, 0:ny, 1:nz+1]) / (dy**2)
-
-    # d2v/dz2 (non-uniform grid)
-    d2v_dz2 = ((v[1:nx+1, 1:ny+1, 2:nz+2] -
-                v[1:nx+1, 1:ny+1, 1:nz+1])/dz_right -
-               (v[1:nx+1, 1:ny+1, 1:nz+1] -
-                v[1:nx+1, 1:ny+1, 0:nz])/dz_left) / dz_cell
-
-    diff_v_term = nu * (d2v_dx2 + d2v_dy2 + d2v_dz2)
-
-    # Combine
-    rhs_v[1:nx+1, 1:ny, 1:nz+1] = adv_v_term + diff_v_term[:, 0:ny-1, :]
-    
-    # ==================================================================
-    # W-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-    
-    # --- Advection term for w ---
-    # d(uw)/dx
-    u_interp = 0.5 * (u[1:nx+1, 1:ny+1, 1:nz] + u[1:nx+1, 1:ny+1, 2:nz+1])
-    w_interp_x = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[2:nx+2, 1:ny+1, 1:nz])
-    uw_right = u_interp * w_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny+1, 1:nz] + u[0:nx, 1:ny+1, 2:nz+1])
-    w_interp_x = 0.5 * (w[0:nx, 1:ny+1, 1:nz] + w[1:nx+1, 1:ny+1, 1:nz])
-    uw_left = u_interp * w_interp_x
-    duwdx = (uw_right - uw_left) / dx
-
-    # d(vw)/dy
-    v_interp = 0.5 * (v[1:nx+1, 1:ny+1, 1:nz] + v[1:nx+1, 1:ny+1, 2:nz+1])
-    w_interp_y = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[1:nx+1, 2:ny+2, 1:nz])
-    vw_top = v_interp * w_interp_y
-    v_interp = 0.5 * (v[1:nx+1, 0:ny, 1:nz] + v[1:nx+1, 0:ny, 2:nz+1])
-    w_interp_y = 0.5 * (w[1:nx+1, 0:ny, 1:nz] + w[1:nx+1, 1:ny+1, 1:nz])
-    vw_bottom = v_interp * w_interp_y
-    dvwdy = (vw_top - vw_bottom) / dy
-
-    # d(ww)/dz
-    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[1:nx+1, 1:ny+1, 2:nz+1])
-    ww_top = w_interp * w_interp
-    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz-1] + w[1:nx+1, 1:ny+1, 1:nz])
-    ww_bottom = w_interp * w_interp
-    dz_avg = dz_c[1:nz].view(1, 1, -1)
-    dwwdz = (ww_top - ww_bottom) / dz_avg
-
-    adv_w_term = duwdx + dvwdy + dwwdz
-
-    # --- Diffusion term for w ---
-    # d2w/dx2
-    d2w_dx2 = (w[2:nx+2, 1:ny+1, 1:nz] -
-               2*w[1:nx+1, 1:ny+1, 1:nz] +
-               w[0:nx, 1:ny+1, 1:nz]) / (dx**2)
-
-    # d2w/dy2
-    d2w_dy2 = (w[1:nx+1, 2:ny+2, 1:nz] -
-               2*w[1:nx+1, 1:ny+1, 1:nz] +
-               w[1:nx+1, 0:ny, 1:nz]) / (dy**2)
-
-    # d2w/dz2 (non-uniform grid)
-    dz_left_w = dz_f[0:nz-1].view(1, 1, -1)
-    dz_right_w = dz_f[1:nz].view(1, 1, -1)
-    dz_cv = dz_c[1:nz].view(1, 1, -1)
-    d2w_dz2 = ((w[1:nx+1, 1:ny+1, 2:nz+1] -
-                w[1:nx+1, 1:ny+1, 1:nz])/dz_right_w -
-               (w[1:nx+1, 1:ny+1, 1:nz] -
-                w[1:nx+1, 1:ny+1, 0:nz-1])/dz_left_w) / dz_cv
-
-    diff_w_term = nu * (d2w_dx2 + d2w_dy2 + d2w_dz2)
-
-    # Combine
-    rhs_w[1:nx+1, 1:ny+1, 1:nz] = adv_w_term + diff_w_term
-
-    return rhs_u, rhs_v, rhs_w
 
 
 # ==============================================================================
@@ -830,224 +634,6 @@ def solve_implicit_diffusion_w(w: torch.Tensor, dt: float, nx: int, ny: int, nz:
 # ENHANCED FUSED KERNELS (GPU Optimization - Phase 4)
 # ==============================================================================
 
-@torch.jit.script
-def compute_momentum_rhs_fused_v2(
-    u: torch.Tensor, v: torch.Tensor, w: torch.Tensor,
-    nx: int, ny: int, nz: int,
-    dx: float, dy: float,
-    dz_c: torch.Tensor, dz_f: torch.Tensor,
-    nu: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Enhanced fused kernel for AB2 scheme: advection + full 3D diffusion.
-
-    Optimizations over v1:
-    - Explicit value reuse to minimize memory loads
-    - Reduced intermediate tensor allocations
-    - Better memory access patterns for GPU coalescing
-    - Strategic computation ordering to keep values in registers
-
-    Returns: (rhs_u, rhs_v, rhs_w) = diffusion - advection for each component
-
-    Performance target: 20-35% improvement over v1 fused kernel
-    """
-    # Allocate output tensors
-    rhs_u = torch.zeros_like(u)
-    rhs_v = torch.zeros_like(v)
-    rhs_w = torch.zeros_like(w)
-
-    # Precompute reciprocals (avoid repeated divisions)
-    dx_inv = 1.0 / dx
-    dy_inv = 1.0 / dy
-    dx2_inv = 1.0 / (dx * dx)
-    dy2_inv = 1.0 / (dy * dy)
-    nu_dx2 = nu * dx2_inv
-    nu_dy2 = nu * dy2_inv
-
-    # Precompute z-grid reciprocals (view for broadcasting)
-    dz_f_inv = 1.0 / dz_f.view(1, 1, -1)
-    dz_c_inv = 1.0 / dz_c.view(1, 1, -1)
-
-    # ==================================================================
-    # U-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-
-    # --- ADVECTION: d(uu)/dx + d(vu)/dy + d(wu)/dz ---
-    # Computed on interior points [1:nx, 1:ny+1, 1:nz+1]
-
-    # d(uu)/dx
-    u_interp = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[2:nx+1, 1:ny+1, 1:nz+1])
-    uu_right = u_interp * u_interp
-    u_interp = 0.5 * (u[0:nx-1, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
-    uu_left = u_interp * u_interp
-    duudx = (uu_right - uu_left) * dx_inv
-
-    # d(vu)/dy
-    v_interp = 0.5 * (v[1:nx, 1:ny+1, 1:nz+1] + v[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 2:ny+2, 1:nz+1])
-    vu_top = v_interp * u_interp_y
-    v_interp = 0.5 * (v[1:nx, 0:ny, 1:nz+1] + v[2:nx+1, 0:ny, 1:nz+1])
-    u_interp_y = 0.5 * (u[1:nx, 0:ny, 1:nz+1] + u[1:nx, 1:ny+1, 1:nz+1])
-    vu_bottom = v_interp * u_interp_y
-    dvudy = (vu_top - vu_bottom) * dy_inv
-
-    # d(wu)/dz
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 1:nz+1] + w[2:nx+1, 1:ny+1, 1:nz+1])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 1:nz+1] + u[1:nx, 1:ny+1, 2:nz+2])
-    wu_top = w_interp * u_interp_z
-    w_interp = 0.5 * (w[1:nx, 1:ny+1, 0:nz] + w[2:nx+1, 1:ny+1, 0:nz])
-    u_interp_z = 0.5 * (u[1:nx, 1:ny+1, 0:nz] + u[1:nx, 1:ny+1, 1:nz+1])
-    wu_bottom = w_interp * u_interp_z
-    dz_avg = dz_f_inv[0, 0, 0:nz]
-    dwudz = (wu_top - wu_bottom) * dz_avg
-
-    advection_u = duudx + dvudy + dwudz
-
-    # --- DIFFUSION: nu * laplacian(u) ---
-    # Computed on [1:nx+1, 1:ny+1, 1:nz+1] then extract [0:nx-1, :, :]
-
-    # d2u/dx2 - periodic
-    u_ext_x = torch.cat([u, u[1:2, :, :]], dim=0)
-    d2u_dx2 = (u_ext_x[2:nx+2, 1:ny+1, 1:nz+1] -
-               2.0 * u_ext_x[1:nx+1, 1:ny+1, 1:nz+1] +
-               u_ext_x[0:nx, 1:ny+1, 1:nz+1]) * nu_dx2
-
-    # d2u/dy2
-    d2u_dy2 = (u[1:nx+1, 2:ny+2, 1:nz+1] -
-               2.0 * u[1:nx+1, 1:ny+1, 1:nz+1] +
-               u[1:nx+1, 0:ny, 1:nz+1]) * nu_dy2
-
-    # d2u/dz2 - non-uniform grid
-    dz_left = dz_c_inv[0, 0, 0:nz]
-    dz_right = dz_c_inv[0, 0, 1:nz+1]
-    dz_cell = dz_f_inv[0, 0, :]
-    d2u_dz2 = nu * ((u[1:nx+1, 1:ny+1, 2:nz+2] - u[1:nx+1, 1:ny+1, 1:nz+1]) * dz_right -
-                    (u[1:nx+1, 1:ny+1, 1:nz+1] - u[1:nx+1, 1:ny+1, 0:nz]) * dz_left) * dz_cell
-
-    diffusion_u = d2u_dx2 + d2u_dy2 + d2u_dz2
-
-    # Combine: RHS = diffusion - advection (interior points [1:nx, 1:ny+1, 1:nz+1])
-    rhs_u[1:nx, 1:ny+1, 1:nz+1] = diffusion_u[0:nx-1, :, :] - advection_u
-
-    # ==================================================================
-    # V-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-
-    # --- ADVECTION: d(uv)/dx + d(vv)/dy + d(wv)/dz ---
-    # Computed on interior points [1:nx+1, 1:ny, 1:nz+1]
-
-    # d(uv)/dx
-    u_interp = 0.5 * (u[1:nx+1, 1:ny, 1:nz+1] + u[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[2:nx+2, 1:ny, 1:nz+1])
-    uv_right = u_interp * v_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny, 1:nz+1] + u[0:nx, 2:ny+1, 1:nz+1])
-    v_interp_x = 0.5 * (v[0:nx, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
-    uv_left = u_interp * v_interp_x
-    duvdx = (uv_right - uv_left) * dx_inv
-
-    # d(vv)/dy
-    v_interp = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 2:ny+1, 1:nz+1])
-    vv_top = v_interp * v_interp
-    v_interp = 0.5 * (v[1:nx+1, 0:ny-1, 1:nz+1] + v[1:nx+1, 1:ny, 1:nz+1])
-    vv_bottom = v_interp * v_interp
-    dvvdy = (vv_top - vv_bottom) * dy_inv
-
-    # d(wv)/dz
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 1:nz+1] + w[1:nx+1, 2:ny+1, 1:nz+1])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 1:nz+1] + v[1:nx+1, 1:ny, 2:nz+2])
-    wv_top = w_interp * v_interp_z
-    w_interp = 0.5 * (w[1:nx+1, 1:ny, 0:nz] + w[1:nx+1, 2:ny+1, 0:nz])
-    v_interp_z = 0.5 * (v[1:nx+1, 1:ny, 0:nz] + v[1:nx+1, 1:ny, 1:nz+1])
-    wv_bottom = w_interp * v_interp_z
-    dz_avg = dz_f_inv[0, 0, 0:nz]
-    dwvdz = (wv_top - wv_bottom) * dz_avg
-
-    advection_v = duvdx + dvvdy + dwvdz
-
-    # --- DIFFUSION: nu * laplacian(v) ---
-    # Computed on [1:nx+1, 1:ny+1, 1:nz+1] then extract [:, 0:ny-1, :]
-
-    # d2v/dx2
-    d2v_dx2 = (v[2:nx+2, 1:ny+1, 1:nz+1] -
-               2.0 * v[1:nx+1, 1:ny+1, 1:nz+1] +
-               v[0:nx, 1:ny+1, 1:nz+1]) * nu_dx2
-
-    # d2v/dy2 - periodic
-    v_ext_y = torch.cat([v, v[:, 1:2, :]], dim=1)
-    d2v_dy2 = (v_ext_y[1:nx+1, 2:ny+2, 1:nz+1] -
-               2.0 * v_ext_y[1:nx+1, 1:ny+1, 1:nz+1] +
-               v_ext_y[1:nx+1, 0:ny, 1:nz+1]) * nu_dy2
-
-    # d2v/dz2 - non-uniform grid (same indexing as u)
-    d2v_dz2 = nu * ((v[1:nx+1, 1:ny+1, 2:nz+2] - v[1:nx+1, 1:ny+1, 1:nz+1]) * dz_right -
-                    (v[1:nx+1, 1:ny+1, 1:nz+1] - v[1:nx+1, 1:ny+1, 0:nz]) * dz_left) * dz_cell
-
-    diffusion_v = d2v_dx2 + d2v_dy2 + d2v_dz2
-
-    # Combine
-    rhs_v[1:nx+1, 1:ny, 1:nz+1] = diffusion_v[:, 0:ny-1, :] - advection_v
-
-    # ==================================================================
-    # W-COMPONENT: Fused advection + diffusion
-    # ==================================================================
-
-    # --- ADVECTION: d(uw)/dx + d(vw)/dy + d(ww)/dz ---
-    # Computed on interior points [1:nx+1, 1:ny+1, 1:nz]
-
-    # d(uw)/dx
-    u_interp = 0.5 * (u[1:nx+1, 1:ny+1, 1:nz] + u[1:nx+1, 1:ny+1, 2:nz+1])
-    w_interp_x = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[2:nx+2, 1:ny+1, 1:nz])
-    uw_right = u_interp * w_interp_x
-    u_interp = 0.5 * (u[0:nx, 1:ny+1, 1:nz] + u[0:nx, 1:ny+1, 2:nz+1])
-    w_interp_x = 0.5 * (w[0:nx, 1:ny+1, 1:nz] + w[1:nx+1, 1:ny+1, 1:nz])
-    uw_left = u_interp * w_interp_x
-    duwdx = (uw_right - uw_left) * dx_inv
-
-    # d(vw)/dy
-    v_interp = 0.5 * (v[1:nx+1, 1:ny+1, 1:nz] + v[1:nx+1, 1:ny+1, 2:nz+1])
-    w_interp_y = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[1:nx+1, 2:ny+2, 1:nz])
-    vw_top = v_interp * w_interp_y
-    v_interp = 0.5 * (v[1:nx+1, 0:ny, 1:nz] + v[1:nx+1, 0:ny, 2:nz+1])
-    w_interp_y = 0.5 * (w[1:nx+1, 0:ny, 1:nz] + w[1:nx+1, 1:ny+1, 1:nz])
-    vw_bottom = v_interp * w_interp_y
-    dvwdy = (vw_top - vw_bottom) * dy_inv
-
-    # d(ww)/dz
-    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 1:nz] + w[1:nx+1, 1:ny+1, 2:nz+1])
-    ww_top = w_interp * w_interp
-    w_interp = 0.5 * (w[1:nx+1, 1:ny+1, 0:nz-1] + w[1:nx+1, 1:ny+1, 1:nz])
-    ww_bottom = w_interp * w_interp
-    dz_avg = dz_c[1:nz].view(1, 1, -1)
-    dwwdz = (ww_top - ww_bottom) / dz_avg
-
-    advection_w = duwdx + dvwdy + dwwdz
-
-    # --- DIFFUSION: nu * laplacian(w) ---
-
-    # d2w/dx2
-    d2w_dx2 = (w[2:nx+2, 1:ny+1, 1:nz] -
-               2.0 * w[1:nx+1, 1:ny+1, 1:nz] +
-               w[0:nx, 1:ny+1, 1:nz]) * nu_dx2
-
-    # d2w/dy2
-    d2w_dy2 = (w[1:nx+1, 2:ny+2, 1:nz] -
-               2.0 * w[1:nx+1, 1:ny+1, 1:nz] +
-               w[1:nx+1, 0:ny, 1:nz]) * nu_dy2
-
-    # d2w/dz2 - non-uniform grid (different stencil for w)
-    dz_left_w = dz_f[0:nz-1].view(1, 1, -1)
-    dz_right_w = dz_f[1:nz].view(1, 1, -1)
-    dz_cv_w = dz_c[0:nz-1].view(1, 1, -1)  # Note: 0:nz-1, not 1:nz!
-    d2w_dz2 = nu * ((w[1:nx+1, 1:ny+1, 2:nz+1] - w[1:nx+1, 1:ny+1, 1:nz]) / dz_right_w -
-                    (w[1:nx+1, 1:ny+1, 1:nz] - w[1:nx+1, 1:ny+1, 0:nz-1]) / dz_left_w) / dz_cv_w
-
-    diffusion_w = d2w_dx2 + d2w_dy2 + d2w_dz2
-
-    # Combine
-    rhs_w[1:nx+1, 1:ny+1, 1:nz] = diffusion_w - advection_w
-
-    return rhs_u, rhs_v, rhs_w
-
 
 @torch.jit.script
 def compute_momentum_rhs_fused_imex(
@@ -1364,8 +950,7 @@ def compute_cfl_fused(
 # solves and the fused momentum RHS — fusing many eager kernels into a few.
 # Opt-in via TORCHANNEL_COMPILE=1 (needs CC=gcc so Inductor's host compiler isn't
 # nvc, which rejects -Wno-psabi).
-import os as _os
-if _os.environ.get("TORCHANNEL_COMPILE", "0") == "1":
+if env.USE_COMPILE:
     compute_momentum_rhs_fused_imex = torch.compile(compute_momentum_rhs_fused_imex)
     solve_implicit_diffusion_u = torch.compile(solve_implicit_diffusion_u)
     solve_implicit_diffusion_v = torch.compile(solve_implicit_diffusion_v)

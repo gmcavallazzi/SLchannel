@@ -29,10 +29,29 @@ import triton.language as tl
 
 
 @triton.jit
-def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
-                N, nx, ny, nz, NYT, NZT,
-                SUX, SUY, SVX, SVY, SWX, SWY,
-                COMP: tl.constexpr, BLOCK: tl.constexpr):
+def _rhs_kernel(
+    U,
+    V,
+    W,
+    OUT,
+    DZF_INV,
+    DZC_INV,
+    PAR,
+    N,
+    nx,
+    ny,
+    nz,
+    NYT,
+    NZT,
+    SUX,
+    SUY,
+    SVX,
+    SVY,
+    SWX,
+    SWY,
+    COMP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     """RHS = xy-diffusion - advection for one component, over its full
     (ghost-padded) tensor extent; non-interior lanes store 0."""
     pid = tl.program_id(0)
@@ -46,11 +65,11 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
     # u covers x-faces 1..nx and v y-faces 1..ny -- EVERY distinct face. u[0] is
     # the periodic ghost of u[nx], so face nx is physical; omitting it costs the
     # flux form its telescoping property (see operators.advection_u).
-    if COMP == 0:      # u: x-faces 1..nx, y centers 1..ny, z centers 1..nz
+    if COMP == 0:  # u: x-faces 1..nx, y centers 1..ny, z centers 1..nz
         inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K <= nz)
-    elif COMP == 1:    # v: x centers 1..nx, y-faces 1..ny, z centers 1..nz
+    elif COMP == 1:  # v: x centers 1..nx, y-faces 1..ny, z centers 1..nz
         inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K <= nz)
-    else:              # w: x centers 1..nx, y centers 1..ny, z-faces 1..nz-1
+    else:  # w: x centers 1..nx, y centers 1..ny, z-faces 1..nz-1
         inside = (I >= 1) & (I <= nx) & (J >= 1) & (J <= ny) & (K >= 1) & (K < nz)
     mi = m & inside
 
@@ -89,16 +108,18 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
         v10 = tl.load(V + vi + SVX, mask=mi, other=0.0)
         v0m = tl.load(V + vi - SVY, mask=mi, other=0.0)
         v1m = tl.load(V + vi + SVX - SVY, mask=mi, other=0.0)
-        dvudy = (0.5 * (v00 + v10) * (0.5 * (uc + uyp))
-                 - 0.5 * (v0m + v1m) * (0.5 * (uym + uc))) * dy_inv
+        dvudy = (
+            0.5 * (v00 + v10) * (0.5 * (uc + uyp)) - 0.5 * (v0m + v1m) * (0.5 * (uym + uc))
+        ) * dy_inv
 
         w00 = tl.load(W + wi, mask=mi, other=0.0)
         w10 = tl.load(W + wi + SWX, mask=mi, other=0.0)
         w0m = tl.load(W + wi - 1, mask=mi, other=0.0)
         w1m = tl.load(W + wi + SWX - 1, mask=mi, other=0.0)
         dzfi = tl.load(DZF_INV + K - 1, mask=mi, other=0.0)
-        dwudz = (0.5 * (w00 + w10) * (0.5 * (uc + uzp))
-                 - 0.5 * (w0m + w1m) * (0.5 * (uzm + uc))) * dzfi
+        dwudz = (
+            0.5 * (w00 + w10) * (0.5 * (uc + uzp)) - 0.5 * (w0m + w1m) * (0.5 * (uzm + uc))
+        ) * dzfi
 
         diff = (uxp - 2.0 * uc + uxm) * nu_dx2 + (uyp - 2.0 * uc + uym) * nu_dy2
         out = diff - (duudx + dvudy + dwudz)
@@ -116,8 +137,9 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
         u01 = tl.load(U + ui + SUY, mask=mi, other=0.0)
         um0 = tl.load(U + ui - SUX, mask=mi, other=0.0)
         um1 = tl.load(U + ui - SUX + SUY, mask=mi, other=0.0)
-        duvdx = (0.5 * (u00 + u01) * (0.5 * (vc + vxp))
-                 - 0.5 * (um0 + um1) * (0.5 * (vxm + vc))) * dx_inv
+        duvdx = (
+            0.5 * (u00 + u01) * (0.5 * (vc + vxp)) - 0.5 * (um0 + um1) * (0.5 * (vxm + vc))
+        ) * dx_inv
 
         t = 0.5 * (vc + vyp)
         b = 0.5 * (vym + vc)
@@ -128,8 +150,9 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
         w0m = tl.load(W + wi - 1, mask=mi, other=0.0)
         w1m = tl.load(W + wi + SWY - 1, mask=mi, other=0.0)
         dzfi = tl.load(DZF_INV + K - 1, mask=mi, other=0.0)
-        dwvdz = (0.5 * (w00 + w01) * (0.5 * (vc + vzp))
-                 - 0.5 * (w0m + w1m) * (0.5 * (vzm + vc))) * dzfi
+        dwvdz = (
+            0.5 * (w00 + w01) * (0.5 * (vc + vzp)) - 0.5 * (w0m + w1m) * (0.5 * (vzm + vc))
+        ) * dzfi
 
         diff = (vxp - 2.0 * vc + vxm) * nu_dx2 + (vyp - 2.0 * vc + vym) * nu_dy2
         out = diff - (duvdx + dvvdy + dwvdz)
@@ -147,15 +170,17 @@ def _rhs_kernel(U, V, W, OUT, DZF_INV, DZC_INV, PAR,
         u0p = tl.load(U + ui + 1, mask=mi, other=0.0)
         um0 = tl.load(U + ui - SUX, mask=mi, other=0.0)
         ump = tl.load(U + ui - SUX + 1, mask=mi, other=0.0)
-        duwdx = (0.5 * (u00 + u0p) * (0.5 * (wc + wxp))
-                 - 0.5 * (um0 + ump) * (0.5 * (wxm + wc))) * dx_inv
+        duwdx = (
+            0.5 * (u00 + u0p) * (0.5 * (wc + wxp)) - 0.5 * (um0 + ump) * (0.5 * (wxm + wc))
+        ) * dx_inv
 
         v00 = tl.load(V + vi, mask=mi, other=0.0)
         v0p = tl.load(V + vi + 1, mask=mi, other=0.0)
         vm0 = tl.load(V + vi - SVY, mask=mi, other=0.0)
         vmp = tl.load(V + vi - SVY + 1, mask=mi, other=0.0)
-        dvwdy = (0.5 * (v00 + v0p) * (0.5 * (wc + wyp))
-                 - 0.5 * (vm0 + vmp) * (0.5 * (wym + wc))) * dy_inv
+        dvwdy = (
+            0.5 * (v00 + v0p) * (0.5 * (wc + wyp)) - 0.5 * (vm0 + vmp) * (0.5 * (wym + wc))
+        ) * dy_inv
 
         t = 0.5 * (wc + wzp)
         b = 0.5 * (wzm + wc)
@@ -179,8 +204,8 @@ class TritonEulerianRHS:
         self.dzf_inv = (1.0 / dz_f).contiguous()
         self.dzc_inv = (1.0 / dz_c).contiguous()
         self.par = torch.tensor(
-            [1.0 / dx, 1.0 / dy, nu / dx ** 2, nu / dy ** 2],
-            dtype=torch.float64, device=device)
+            [1.0 / dx, 1.0 / dy, nu / dx**2, nu / dy**2], dtype=torch.float64, device=device
+        )
 
     def __call__(self, u, v, w):
         nx, ny, nz = self.nx, self.ny, self.nz
@@ -193,9 +218,27 @@ class TritonEulerianRHS:
             n = f.numel()
             grid = (triton.cdiv(n, self.BLOCK),)
             _rhs_kernel[grid](
-                u, v, w, out, self.dzf_inv, self.dzc_inv, self.par,
-                n, nx, ny, nz, f.shape[1], f.shape[2],
-                sux, suy, svx, svy, swx, swy,
-                comp, self.BLOCK)
+                u,
+                v,
+                w,
+                out,
+                self.dzf_inv,
+                self.dzc_inv,
+                self.par,
+                n,
+                nx,
+                ny,
+                nz,
+                f.shape[1],
+                f.shape[2],
+                sux,
+                suy,
+                svx,
+                svy,
+                swx,
+                swy,
+                comp,
+                self.BLOCK,
+            )
             outs.append(out)
         return tuple(outs)
