@@ -13,9 +13,7 @@ from slchannel.solver import SLChannelFlow
 
 
 def make_state(nominal=0.064, factor=2.0):
-    return SimpleNamespace(
-        _u_tau_nominal=nominal, blowup_u_tau_factor=factor, _blowup_strikes=0
-    )
+    return SimpleNamespace(_u_tau_nominal=nominal, blowup_u_tau_factor=factor, _blowup_strikes=0)
 
 
 def check(state, u_tau):
