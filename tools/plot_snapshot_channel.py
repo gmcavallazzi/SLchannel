@@ -56,6 +56,8 @@ def main():
         "--Re; the snapshot file does not store it.",
     )
     ap.add_argument("--Re", type=float, default=None, help="bulk Reynolds number; nu = 1/Re.")
+    ap.add_argument("--cmap-u", default="magma", help="colormap for the u component")
+    ap.add_argument("--cmap-vw", default="berlin", help="diverging colormap for v and w")
     args = ap.parse_args()
 
     d = np.load(args.fields)
@@ -78,9 +80,9 @@ def main():
         )
 
     comps = {
-        "u": (r"u/U_b", "viridis", False),
-        "v": (r"v/U_b", "RdBu_r", True),
-        "w": (r"w/U_b", "RdBu_r", True),
+        "u": (r"u/U_b", args.cmap_u, False),
+        "v": (r"v/U_b", args.cmap_vw, True),
+        "w": (r"w/U_b", args.cmap_vw, True),
     }
 
     for comp, (label, cmap, sym) in comps.items():
