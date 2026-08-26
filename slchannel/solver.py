@@ -1177,7 +1177,10 @@ class SLChannelFlow:
         """True once u_tau has exceeded blowup_u_tau_factor * u_tau_nominal
         on three consecutive diagnostics; a single spike resets nothing a
         healthy run cannot recover from, so transients do not trigger it."""
-        if self._u_tau_nominal is not None and u_tau > self.blowup_u_tau_factor * self._u_tau_nominal:
+        if (
+            self._u_tau_nominal is not None
+            and u_tau > self.blowup_u_tau_factor * self._u_tau_nominal
+        ):
             self._blowup_strikes += 1
         else:
             self._blowup_strikes = 0
@@ -1307,8 +1310,16 @@ class SLChannelFlow:
                 # cells of (|u|/dx + |v|/dy + |w|/dz_local) * dt, local dz
                 cfl_scalar = (
                     operators.compute_cfl_fused(
-                        self.u, self.v, self.w, self.nx, self.ny, self.nz,
-                        self.dx, self.dy, self.dz_f, self.dz_c,
+                        self.u,
+                        self.v,
+                        self.w,
+                        self.nx,
+                        self.ny,
+                        self.nz,
+                        self.dx,
+                        self.dy,
+                        self.dz_f,
+                        self.dz_c,
                     )
                     * self.dt
                 )
@@ -1338,9 +1349,20 @@ class SLChannelFlow:
                     )
                     print(f"{'=' * 90}\n", flush=True)
                     save_flow_fields(
-                        self.u, self.v, self.w, self.p, self.z_c, self.z_f,
-                        self.Lx, self.Ly, step, self.time, u_tau_scalar,
-                        forcing_scalar, self.results_folder, "fields_blowup.npz",
+                        self.u,
+                        self.v,
+                        self.w,
+                        self.p,
+                        self.z_c,
+                        self.z_f,
+                        self.Lx,
+                        self.Ly,
+                        step,
+                        self.time,
+                        u_tau_scalar,
+                        forcing_scalar,
+                        self.results_folder,
+                        "fields_blowup.npz",
                     )
                     print("Blow-up state saved to fields_blowup.npz", flush=True)
                     break
