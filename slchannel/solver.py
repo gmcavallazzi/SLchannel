@@ -1187,13 +1187,15 @@ class SLChannelFlow:
         """Advance the flow until `time.t_max` or `time.n_steps` is reached.
 
         Progress is printed as a table: step, time, dt, max|div|, bulk velocity,
-        u_tau and the driving forcing, plus a `clamped` column under the SL
-        scheme counting departure points clamped at the walls.
+        u_tau, the driving forcing and the effective advective CFL of the step
+        (max over cells of (|u|/dx + |v|/dy + |w|/dz_local) * dt), plus a
+        `clamped` column under the SL scheme counting departure points clamped
+        at the walls.
 
         Writes into `output.results_folder`:
 
         ``timeseries.npz``
-            Per-step history of the scalar diagnostics.
+            Per-step history of the scalar diagnostics, including `cfl`.
         ``fields.npz``
             Latest checkpoint, overwritten every `output.n_save` steps; this is
             what a restart reads.
@@ -1248,7 +1250,7 @@ class SLChannelFlow:
         print("=" * 90, flush=True)
         header = (
             f"{'Step':>6} {'Time':>10} {'dt':>10} {'max(div)':>12} "
-            f"{'u_bulk':>10} {'u_tau':>10} {'forcing':>12}"
+            f"{'u_bulk':>10} {'u_tau':>10} {'forcing':>12} {'CFL':>8}"
         )
         if self.advection_scheme == "sl":
             header += f" {'clamped':>9}"
@@ -1265,6 +1267,7 @@ class SLChannelFlow:
             "u_bulk": np.zeros(chunk_size, dtype=np.float64),
             "u_tau": np.zeros(chunk_size, dtype=np.float64),
             "forcing": np.zeros(chunk_size, dtype=np.float64),
+            "cfl": np.zeros(chunk_size, dtype=np.float64),
             "index": 0,
         }
 
@@ -1300,6 +1303,15 @@ class SLChannelFlow:
                 u_tau = compute_u_tau(
                     self.u, self.z_c, self.nu, top_wall_bc_type=self.top_wall_bc_type
                 )
+                # effective advective CFL of the step just taken: max over all
+                # cells of (|u|/dx + |v|/dy + |w|/dz_local) * dt, local dz
+                cfl_scalar = (
+                    operators.compute_cfl_fused(
+                        self.u, self.v, self.w, self.nx, self.ny, self.nz,
+                        self.dx, self.dy, self.dz_f, self.dz_c,
+                    )
+                    * self.dt
+                )
 
                 u_bulk_scalar = u_bulk.item() if torch.is_tensor(u_bulk) else u_bulk
                 u_tau_scalar = u_tau.item() if torch.is_tensor(u_tau) else u_tau
@@ -1311,6 +1323,7 @@ class SLChannelFlow:
                 timeseries_data["u_bulk"][idx] = u_bulk_scalar
                 timeseries_data["u_tau"][idx] = u_tau_scalar
                 timeseries_data["forcing"][idx] = forcing_scalar
+                timeseries_data["cfl"][idx] = cfl_scalar
                 timeseries_data["index"] += 1
 
                 if self.stop_on_blowup and self._blowup_check(u_tau_scalar):
@@ -1401,7 +1414,7 @@ class SLChannelFlow:
                     n_filled = timeseries_data["index"]
                     chunks = {
                         k: timeseries_data[k][:n_filled]
-                        for k in ("step", "time", "u_bulk", "u_tau", "forcing")
+                        for k in ("step", "time", "u_bulk", "u_tau", "forcing", "cfl")
                     }
                     if os.path.exists(npz_file):
                         existing = np.load(npz_file)
@@ -1465,6 +1478,7 @@ class SLChannelFlow:
                 row = (
                     f"{step:6d} {self.time:10.6f} {self.dt:10.6f} {max_div:12.3e} "
                     f"{u_bulk_scalar:10.6f} {u_tau_scalar:10.6f} {forcing_scalar:12.3e}"
+                    f" {cfl_scalar:8.3f}"
                 )
                 if self.advection_scheme == "sl":
                     row += f" {self.sl.n_clamped_last.item():9d}"
