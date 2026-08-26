@@ -1209,6 +1209,12 @@ class SLChannelFlow:
         ``fields_error.npz``
             Written only if the solution goes non-finite, for post-mortem.
 
+        Creating a file named ``STOP`` in the results folder requests a
+        graceful stop: at the next diagnostic step the solver flushes the
+        timeseries, writes the ``fields.npz`` checkpoint and the statistics
+        state, and exits without writing ``fields_final.npz``. Remove the
+        STOP file before restarting.
+
         Returns
         -------
         None
@@ -1273,6 +1279,28 @@ class SLChannelFlow:
             "cfl": np.zeros(chunk_size, dtype=np.float64),
             "index": 0,
         }
+
+        def flush_timeseries():
+            if timeseries_data["index"] == 0:
+                return
+            npz_file = os.path.join(self.results_folder, "timeseries.npz")
+            n_filled = timeseries_data["index"]
+            chunks = {
+                k: timeseries_data[k][:n_filled]
+                for k in ("step", "time", "u_bulk", "u_tau", "forcing", "cfl")
+            }
+            if os.path.exists(npz_file):
+                existing = np.load(npz_file)
+                chunks = {k: np.concatenate([existing[k], chunks[k]]) for k in chunks}
+            np.savez_compressed(npz_file, **chunks)
+            timeseries_data["index"] = 0
+
+        # a file named STOP in the results folder requests a graceful stop:
+        # checkpoint and exit cleanly WITHOUT writing fields_final.npz, so a
+        # restart-chain job can tell a pause from a completed run. The file is
+        # left in place; remove it to resume.
+        stop_request_path = os.path.join(self.results_folder, "STOP")
+        stop_requested = False
 
         step = self.initial_step
         while step < self.n_steps and self.time < self.t_max:
@@ -1431,18 +1459,7 @@ class SLChannelFlow:
                     u_tau_scalar = u_tau.item() if torch.is_tensor(u_tau) else u_tau
                     forcing_scalar = forcing.item() if torch.is_tensor(forcing) else forcing
 
-                if timeseries_data["index"] > 0:
-                    npz_file = os.path.join(self.results_folder, "timeseries.npz")
-                    n_filled = timeseries_data["index"]
-                    chunks = {
-                        k: timeseries_data[k][:n_filled]
-                        for k in ("step", "time", "u_bulk", "u_tau", "forcing", "cfl")
-                    }
-                    if os.path.exists(npz_file):
-                        existing = np.load(npz_file)
-                        chunks = {k: np.concatenate([existing[k], chunks[k]]) for k in chunks}
-                    np.savez_compressed(npz_file, **chunks)
-                    timeseries_data["index"] = 0
+                flush_timeseries()
 
                 save_flow_fields(
                     self.u,
@@ -1506,10 +1523,42 @@ class SLChannelFlow:
                     row += f" {self.sl.n_clamped_last.item():9d}"
                 print(row, flush=True)
 
+                if os.path.exists(stop_request_path):
+                    stop_requested = True
+                    print(f"\n{'=' * 90}", flush=True)
+                    print(
+                        f"STOP file found -- checkpointing and stopping at step {step}, "
+                        f"time = {self.time:.6f} (remove {stop_request_path} to resume)",
+                        flush=True,
+                    )
+                    print(f"{'=' * 90}\n", flush=True)
+                    flush_timeseries()
+                    save_flow_fields(
+                        self.u,
+                        self.v,
+                        self.w,
+                        self.p,
+                        self.z_c,
+                        self.z_f,
+                        self.Lx,
+                        self.Ly,
+                        step,
+                        self.time,
+                        u_tau_scalar,
+                        forcing_scalar,
+                        self.results_folder,
+                        "fields.npz",
+                    )
+                    if self.turbulence_stats is not None and self.turbulence_stats.n_samples > 0:
+                        self.turbulence_stats.save_state(self.stats_state_path)
+                    break
+
+        flush_timeseries()
         total_wall_time = time.time() - start_time
         print(f"{'=' * 90}", flush=True)
+        outcome = "Simulation paused (STOP file)" if stop_requested else "Simulation complete"
         print(
-            f"Simulation complete: {step} steps, total time = {self.time:.6f}, final dt = {self.dt:.6f}",
+            f"{outcome}: {step} steps, total time = {self.time:.6f}, final dt = {self.dt:.6f}",
             flush=True,
         )
         print(f"Total wall time: {total_wall_time:.2f}s", flush=True)
@@ -1533,6 +1582,11 @@ class SLChannelFlow:
             "u_profile_final.png",
             self.results_folder,
         )
+
+        if stop_requested:
+            # paused via STOP file: skip fields_final.npz so a restart chain
+            # can tell a pause from a run that reached t_max
+            return
 
         u_tau_final = compute_u_tau(
             self.u, self.z_c, self.nu, top_wall_bc_type=self.top_wall_bc_type
