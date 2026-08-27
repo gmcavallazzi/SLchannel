@@ -17,7 +17,9 @@ from slchannel.utils import generate_grid  # noqa: E402
 TWO_PI = 6.283185307179586
 
 
-def build_ref(nx=32, ny=32, nz=32, Lx=TWO_PI, Ly=TWO_PI, Lz=2.0, gamma=1.5, order=6, **kw):
+def build_ref(
+    nx=32, ny=32, nz=32, Lx=TWO_PI, Ly=TWO_PI, Lz=2.0, gamma=1.5, order=6, interp_dtype="fp64", **kw
+):
     dx, dy = Lx / nx, Ly / ny
     z_f, z_c, dz_f, dz_c = generate_grid(gamma, nz, Lz)
     adv = SLAdvector(
@@ -115,10 +117,10 @@ def mono_advect_nodes(adv, grid, nodes, mid_nodes, dt_t):
     us, vs, ws = adv.advect(U, V, W, MU, MV, MW, dt_t)
     nz = grid["nz"]
     out = {}
-    out["u"] = torch.zeros(nx, ny, node_z_len("u", nz))
+    out["u"] = torch.zeros(nx, ny, node_z_len("u", nz), device=us.device)
     out["u"][:, :, 1 : nz + 1] = torch.roll(us[1 : nx + 1, 1 : ny + 1, 1 : nz + 1], 1, dims=0)
-    out["v"] = torch.zeros(nx, ny, node_z_len("v", nz))
+    out["v"] = torch.zeros(nx, ny, node_z_len("v", nz), device=us.device)
     out["v"][:, :, 1 : nz + 1] = torch.roll(vs[1 : nx + 1, 1 : ny + 1, 1 : nz + 1], 1, dims=1)
-    out["w"] = torch.zeros(nx, ny, node_z_len("w", nz))
+    out["w"] = torch.zeros(nx, ny, node_z_len("w", nz), device=us.device)
     out["w"][:, :, 1:nz] = ws[1 : nx + 1, 1 : ny + 1, 1:nz]
     return out

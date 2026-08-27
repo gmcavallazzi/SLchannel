@@ -58,9 +58,12 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     run_dist = os.environ.get("SLC_RUN_DIST") == "1" or "dist" in config.getoption("-m", "")
     skip_dist = pytest.mark.skip(reason="dist tests are opt-in (-m dist or SLC_RUN_DIST=1)")
+    skip_gpu = pytest.mark.skip(reason="requires CUDA")
     for item in items:
         if "dist" in item.keywords and not run_dist:
             item.add_marker(skip_dist)
+        if "gpu" in item.keywords and not torch.cuda.is_available():
+            item.add_marker(skip_gpu)
 
 
 def pytest_terminal_summary(terminalreporter):

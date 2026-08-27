@@ -126,8 +126,8 @@ class Decomp:
             i0, j0 = self.origin(rank)
             ext = self.alloc(comp, dtype=nodes.dtype, device=nodes.device)
             if fill_halos:
-                gx = torch.arange(i0 - H, i0 + self.nxl + H) % self.nx
-                gy = torch.arange(j0 - H, j0 + self.nyl + H) % self.ny
+                gx = torch.arange(i0 - H, i0 + self.nxl + H, device=nodes.device) % self.nx
+                gy = torch.arange(j0 - H, j0 + self.nyl + H, device=nodes.device) % self.ny
                 ext.copy_(nodes[gx][:, gy])
             else:
                 ext[H : H + self.nxl, H : H + self.nyl, :] = nodes[

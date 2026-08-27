@@ -32,6 +32,11 @@ def test_dist_backend(check, world):
                 f"max|diff|={res['advect_vs_mono']:.3e}",
             )
             check(
+                f"w{world} r{rank} pencil poisson",
+                res["poisson_pencil"] <= 1e-12,
+                f"max|diff|={res['poisson_pencil']:.3e}",
+            )
+            check(
                 f"w{world} r{rank} reductions",
                 res["allreduce_sum"] == 0.0 and res["allgather"] == 0.0,
                 f"sum err {res['allreduce_sum']:g}, gather err {res['allgather']:g}",

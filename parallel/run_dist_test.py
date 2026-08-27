@@ -83,7 +83,21 @@ def _run_checks(rank, world):
     err = max(err, float((outs["w"] - mono["w"][gx_v][:, gy_u, 1:nz]).abs().max()))
     results["advect_vs_mono"] = err
 
-    # 3. allreduce and allgather round trips
+    # 3. pencil-transposed Poisson vs the gathered path
+    from parallel.poisson_gather import solve_poisson_gathered
+    from parallel.poisson_pencil import solve_poisson_pencil
+    from slchannel.projection import initialize_fft_solver
+
+    fft_data = initialize_fft_solver(
+        d.nx, d.ny, d.nz, grid["dx"], grid["dy"], grid["dz_c"], grid["dz_f"]
+    )
+    i0, j0 = d.origin(rank)
+    div_blk = nodes["w"][i0 : i0 + d.nxl, j0 : j0 + d.nyl, : d.nz].contiguous()
+    ref_p = solve_poisson_gathered({rank: div_blk.clone()}, comm, d, fft_data, 0.01)
+    pen_p = solve_poisson_pencil({rank: div_blk.clone()}, comm, d, fft_data, 0.01)
+    results["poisson_pencil"] = float((pen_p[rank] - ref_p[rank]).abs().max())
+
+    # 4. allreduce and allgather round trips
     red = comm.allreduce({rank: torch.tensor(float(rank + 1))}, op="sum")[rank]
     results["allreduce_sum"] = float(red) - world * (world + 1) / 2.0
     full = comm.allgather_nodes({rank: ext["w"]})[rank]

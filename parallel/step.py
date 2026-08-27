@@ -25,11 +25,12 @@ from slchannel.operators import (
 from slchannel.utils import compute_divergence
 
 from .poisson_gather import solve_poisson_gathered
+from .poisson_pencil import solve_poisson_pencil
 from .sl_local import LocalSL
 
 
 class DecomposedBDF2:
-    def __init__(self, mono, decomp, comm):
+    def __init__(self, mono, decomp, comm, poisson="gathered"):
         """Seed from a monolithic SLChannelFlow instance (grid, transport
         coefficients, fft_data and the reference advector all come from it;
         its current u/v/w become the initial state)."""
@@ -45,6 +46,8 @@ class DecomposedBDF2:
         self.fft_data = mono.fft_data
         self.total_volume = mono.total_volume
         self.ref = mono.sl
+        assert poisson in ("gathered", "pencil")
+        self.poisson = poisson
 
         ranks = comm.local_ranks
         self.sl = {r: LocalSL(self.ref, decomp, r) for r in ranks}
@@ -180,7 +183,10 @@ class DecomposedBDF2:
             )
             for r in self.comm.local_ranks
         }
-        p_ext = solve_poisson_gathered(div, self.comm, self.d, self.fft_data, dt_eff)
+        if self.poisson == "pencil":
+            p_ext = solve_poisson_pencil(div, self.comm, self.d, self.fft_data, dt_eff)
+        else:
+            p_ext = solve_poisson_gathered(div, self.comm, self.d, self.fft_data, dt_eff)
         ox, oy = self.own
         for r in self.comm.local_ranks:
             p = p_ext[r]
