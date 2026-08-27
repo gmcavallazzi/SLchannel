@@ -22,7 +22,7 @@ from slchannel.operators import (
     solve_implicit_diffusion_v,
     solve_implicit_diffusion_w,
 )
-from slchannel.utils import compute_divergence
+from slchannel.utils import compute_bulk_velocity, compute_divergence
 
 from .poisson_gather import solve_poisson_gathered
 from .poisson_pencil import solve_poisson_pencil
@@ -30,7 +30,7 @@ from .sl_local import LocalSL
 
 
 class DecomposedBDF2:
-    def __init__(self, mono, decomp, comm, poisson="gathered"):
+    def __init__(self, mono, decomp, comm, poisson="gathered", use_triton=False):
         """Seed from a monolithic SLChannelFlow instance (grid, transport
         coefficients, fft_data and the reference advector all come from it;
         its current u/v/w become the initial state)."""
@@ -45,12 +45,18 @@ class DecomposedBDF2:
         self.top_wall = mono.top_wall_bc_type
         self.fft_data = mono.fft_data
         self.total_volume = mono.total_volume
+        self.cell_vol_ratio = mono.cell_vol_ratio
         self.ref = mono.sl
         assert poisson in ("gathered", "pencil")
         self.poisson = poisson
 
         ranks = comm.local_ranks
         self.sl = {r: LocalSL(self.ref, decomp, r) for r in ranks}
+        self.tsl = None
+        if use_triton:
+            from .sl_triton_local import TritonLocalSL
+
+            self.tsl = {r: TritonLocalSL(self.sl[r]) for r in ranks}
         self.state = {}
         for c in "uvw":
             nodes = mono_node_view(getattr(mono, c), c, self.nx, self.ny)
@@ -203,16 +209,18 @@ class DecomposedBDF2:
 
     def _bulk_forcing(self, dt):
         """Exact-flux uniform shift (fork of _apply_bulk_forcing,
-        solver.py:669-698); the volume sum becomes local sum + allreduce."""
-        nz = self.nz
-        vol_z = (self.dx * self.dy * self.dz_f[0:nz]).view(1, 1, -1)
-        loc = {
-            r: (self.d.owned(self.state["u"][r])[:, :, 1 : nz + 1] * vol_z).sum()
-            for r in self.comm.local_ranks
-        }
-        tot = self.comm.allreduce(loc, op="sum")
+        solver.py:669-698). The volume sum runs on the GATHERED monolithic
+        field with production's own compute_bulk_velocity, so the reduction
+        order -- and therefore every subsequent step -- is bit-identical to
+        the single-GPU solver. (A rank-local sum + allreduce differs at the
+        1e-16 level, which chaotic amplification turns into full field
+        decorrelation over O(100) time units.)"""
+        from .decomp import nodes_to_mono
+
+        full = self.comm.allgather_nodes(self.state["u"])
         for r in self.comm.local_ranks:
-            u_bulk = tot[r].to(self.state["u"][r].device) / self.total_volume
+            u_mono = nodes_to_mono(full[r], "u", self.nx, self.ny)
+            u_bulk = compute_bulk_velocity(u_mono, self.cell_vol_ratio, self.total_volume)
             corr = self.U_bulk - u_bulk
             self.state["u"][r] += corr
         self._bc_exchange(("u",))
@@ -222,12 +230,16 @@ class DecomposedBDF2:
 
     def _advect_all(self, fields, mids, dt_t):
         outs = {}
+        adv = self.tsl if self.tsl is not None else self.sl
         for r in self.comm.local_ranks:
-            outs[r] = self.sl[r].advect(
+            o = adv[r].advect(
                 {c: fields[c][r] for c in "uvw"},
                 {c: mids[c][r] for c in "uvw"},
                 dt_t,
             )
+            # production writes the fp32 Triton gather into fp64 buffers
+            # before the BDF2 combination (semilag.py:660-663) -- mirror that
+            outs[r] = {c: v.to(torch.float64) for c, v in o.items()}
         return outs
 
     def _star_from(self, vals):
