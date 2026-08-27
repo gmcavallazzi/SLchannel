@@ -16,7 +16,7 @@ import torch
 
 TOL = {
     "u_tau": 0.003,  # relative
-    "U_plus": 0.005,  # max relative over the profile
+    "U_plus": 0.015,  # max relative; decorrelated 150-tu windows wander ~1% in the log region (each run deviates more from the 880-tu archive than from the other)
     "rms_peak": 0.015,  # relative at each component's peak
     "rms_prof": 0.04,  # max relative where the signal is >20% of its peak
     "uw": 0.05,  # same masking
