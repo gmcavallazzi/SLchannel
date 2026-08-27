@@ -50,6 +50,7 @@ def main():
         top_wall_bc_type=cfg.get("boundary_conditions", {})
         .get("top_wall", {})
         .get("type", "dirichlet"),
+        spectra_z_planes=s.get("spectra_z_planes", None),
     )
     ts.load_state(os.path.join(folder, s.get("state_file", "turbulence_stats_state.npz")))
     ts.save_statistics(os.path.join(folder, s.get("output_file", "turbulence_stats.npz")))

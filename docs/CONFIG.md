@@ -133,6 +133,7 @@ ignored.
 | `n_stats` | int | `0` | Steps between statistics samples. `0` disables. |
 | `t_stats` | float | `10.0` | Simulation time before sampling starts — the warm-up window. |
 | `z_plus_target` | float | `15.0` | Wall-unit height at which spectra are taken (the near-wall peak). |
+| `spectra_z_planes` | list of floats | `None` | Extra wall-unit heights at which 2D spectra are also accumulated (both walls averaged). They carry their own sample counter, so they can be added to a running campaign: a restart from a state file that predates them starts their accumulation fresh. |
 | `output_file` | str | `turbulence_stats.npz` | Finalised statistics, written into `results_folder`. |
 | `state_file` | str | `turbulence_stats_state.npz` | Raw accumulators, so a restart can continue the same averaging window. |
 | `restart_state_file` | path | `None` | Accumulator state to resume from. |

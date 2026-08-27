@@ -525,6 +525,7 @@ class SLChannelFlow:
                 z_plus_target=z_plus_target,
                 device=self.device,
                 top_wall_bc_type=self.top_wall_bc_type,
+                spectra_z_planes=stats_config.get("spectra_z_planes", None),
             )
             if stats_restart_file is not None:
                 print(f"  Loading statistics state from: {stats_restart_file}", flush=True)

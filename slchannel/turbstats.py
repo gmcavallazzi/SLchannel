@@ -35,7 +35,7 @@ class TurbulenceStats:
 
     def __init__(self, nx, ny, nz, Lx, Ly, Lz, z_c, z_f, dz_c, dz_f,
                  dx, dy, nu, Re_tau_target, z_plus_target=15.0, device='cpu',
-                 top_wall_bc_type='dirichlet'):
+                 top_wall_bc_type='dirichlet', spectra_z_planes=None):
         """
         Initialize statistics accumulator.
 
@@ -133,6 +133,25 @@ class TurbulenceStats:
         # dx, dy are already grid spacings (Lx/nx, Ly/ny)
         self.kx = 2 * np.pi * np.fft.rfftfreq(nx, d=dx)[1:]  # Skip DC component
         self.ky = 2 * np.pi * np.fft.rfftfreq(ny, d=dy)[1:]
+
+        # Extra 2D-spectra planes (z+ targets from each wall, both walls
+        # averaged like the primary plane). They carry their OWN sample
+        # counter so they can be added to a campaign mid-run: a state file
+        # saved before they existed restores with n_samples_extra = 0 and
+        # they simply start accumulating from that restart.
+        self.spectra_z_planes = [float(zp) for zp in (spectra_z_planes or [])]
+        self.n_samples_extra = 0
+        self.extra_planes = []
+        for zp in self.spectra_z_planes:
+            z_t = zp * nu / self.u_tau_target
+            kb = torch.argmin(torch.abs(z_c_interior - z_t)).item() + 1
+            kt = torch.argmin(torch.abs(z_c_interior - (Lz - z_t))).item() + 1
+            sums = {c: torch.zeros(nx//2, ny//2, device=device)
+                    for c in ('uu', 'vv', 'ww', 'uw')}
+            self.extra_planes.append({'zp': zp, 'k_bot': kb, 'k_top': kt,
+                                      'sums': sums})
+            print(f"  Extra spectra plane z+ = {zp:.0f}: z_c[{kb}] = {z_c[kb]:.6f}, "
+                  f"z+ = {z_c[kb] * self.u_tau_target / nu:.1f}", flush=True)
 
     def accumulate_statistics(self, u, v, w, u_tau_current):
         """
@@ -321,6 +340,22 @@ class TurbulenceStats:
         self.E_ww_2d_sum += E_ww_2d_sym[:nkx, :nky]
         self.E_uw_2d_sum += E_uw_2d_sym[:nkx, :nky]
 
+        # Extra planes: same construction (unfiltered nodes, both walls
+        # averaged, w negated at the top wall for the uw cospectrum)
+        for pl in self.extra_planes:
+            fu_b = torch.fft.rfft2(u_node_f[:, :, pl['k_bot'] - 1])
+            fv_b = torch.fft.rfft2(v_node_f[:, :, pl['k_bot'] - 1])
+            fw_b = torch.fft.rfft2(w_fluct[:, :, pl['k_bot'] - 1])
+            fu_t = torch.fft.rfft2(u_node_f[:, :, pl['k_top'] - 1])
+            fv_t = torch.fft.rfft2(v_node_f[:, :, pl['k_top'] - 1])
+            fw_t = torch.fft.rfft2(-w_fluct[:, :, pl['k_top'] - 1])
+            pl['sums']['uu'] += fold_spectrum(0.5 * (_auto(fu_b) + _auto(fu_t)))[:nkx, :nky]
+            pl['sums']['vv'] += fold_spectrum(0.5 * (_auto(fv_b) + _auto(fv_t)))[:nkx, :nky]
+            pl['sums']['ww'] += fold_spectrum(0.5 * (_auto(fw_b) + _auto(fw_t)))[:nkx, :nky]
+            pl['sums']['uw'] += fold_spectrum(0.5 * (_cross_re(fu_b, fw_b) + _cross_re(fu_t, fw_t)))[:nkx, :nky]
+        if self.extra_planes:
+            self.n_samples_extra += 1
+
         # Increment sample counter
         self.n_samples += 1
 
@@ -415,6 +450,15 @@ class TurbulenceStats:
             'u_tau': u_tau_computed  # Friction velocity from Reynolds stress
         }
 
+        if self.extra_planes and self.n_samples_extra > 0:
+            stats['n_samples_extra'] = self.n_samples_extra
+            stats['spectra_z_planes'] = np.asarray(self.spectra_z_planes)
+            for pl in self.extra_planes:
+                stats[f"z_index_z{pl['zp']:.0f}"] = pl['k_bot']
+                for c in ('uu', 'vv', 'ww', 'uw'):
+                    stats[f"E_{c}_2d_z{pl['zp']:.0f}"] = np.asarray(
+                        (pl['sums'][c] / self.n_samples_extra).detach().cpu().numpy())
+
         return stats
 
     def save_statistics(self, filepath):
@@ -478,6 +522,13 @@ class TurbulenceStats:
             'ny': self.ny,
             'nz': self.nz,
         }
+        if self.extra_planes:
+            state['n_samples_extra'] = self.n_samples_extra
+            state['spectra_z_planes'] = np.asarray(self.spectra_z_planes)
+            for pl in self.extra_planes:
+                for c in ('uu', 'vv', 'ww', 'uw'):
+                    state[f"E_{c}_2d_z{pl['zp']:.0f}_sum"] = np.asarray(
+                        pl['sums'][c].detach().cpu().numpy())
 
         np.savez_compressed(filepath, **state)
         print(f"\nStatistics state saved: {self.n_samples} samples accumulated -> {filepath}", flush=True)
@@ -516,6 +567,22 @@ class TurbulenceStats:
         self.E_vv_2d_sum = torch.tensor(data['E_vv_2d_sum'], device=self.device)
         self.E_ww_2d_sum = torch.tensor(data['E_ww_2d_sum'], device=self.device)
         self.E_uw_2d_sum = torch.tensor(data['E_uw_2d_sum'], device=self.device)
+
+        # Extra spectra planes: restore only if the state carries the same
+        # plane set; otherwise (state predates them, or planes changed) the
+        # extras keep their zero initialization and their own counter starts
+        # at this restart.
+        saved_planes = (list(np.asarray(data['spectra_z_planes']).ravel())
+                        if 'spectra_z_planes' in data.files else [])
+        if self.extra_planes and saved_planes == self.spectra_z_planes:
+            self.n_samples_extra = int(data['n_samples_extra'])
+            for pl in self.extra_planes:
+                for c in ('uu', 'vv', 'ww', 'uw'):
+                    pl['sums'][c] = torch.tensor(
+                        data[f"E_{c}_2d_z{pl['zp']:.0f}_sum"], device=self.device)
+        elif self.extra_planes:
+            print(f"  Extra spectra planes start fresh at this restart "
+                  f"(state has {saved_planes or 'none'})", flush=True)
 
         # Backward compatibility: ignore dUdz_sum and omega_y_sum if they exist in old files
         # (they are no longer computed or needed)
