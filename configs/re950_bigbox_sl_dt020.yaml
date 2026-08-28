@@ -25,15 +25,14 @@
 # (comfortable on 4 x 141 GB, borderline on 4 x 80 GB; calibrate with a
 # short smoke run first).
 #
-# Seeding: tile the converged M950 field (2pi x pi) 4x in x, 3x in y with
-# a decorrelating perturbation, then the interpolate init below brings it
-# onto this grid and projects it:
-#   python tools/tile_field.py data/m950_seed_768x640x320.npz \
-#       --config configs/re950_bigbox_sl_dt020.yaml \
-#       --out results/re950_bigbox_sl_dt020/seed_tiled.npz
+# Seeding: the interpolate init below maps the converged M950 field
+# (2pi x pi) proportionally onto the 8pi x 3pi box — a stretch, NOT a
+# tiling (periodic replicas stay correlated and poison the box-scale
+# statistics this run exists to measure; stretched structures are simply
+# wiped out by the warm-up). Fetch the seed first:
+#   python tools/fetch_data.py m950_seed
 #
-# Warm-up: the tiled field is converged small-box turbulence, so the
-# transient is box-adjustment only; stats start at t+ = 2000 from launch
+# Warm-up: stats start at t+ = 2000 from launch
 # (t = 2000/(u_tau^2 Re) = 42.5) and run 20 eddy turnovers to t_max = 440.
 # Launch (4 GPUs, one rank each):
 #   torchrun --nproc_per_node=4 -m parallel.production \
@@ -63,7 +62,7 @@ grid:
   nz: 320
 initialization:
   type: interpolate
-  field_file: results/re950_bigbox_sl_dt020/seed_tiled.npz
+  field_file: data/m950_seed_768x640x320.npz
   reset_time: true
 output:
   n_out: 50

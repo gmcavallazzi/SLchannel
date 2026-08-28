@@ -96,3 +96,57 @@ def test_tile_field(check):
         t = SLChannelFlow(config_file=f"{tmp}/tgt.yaml")
         t.step_sl_bdf2(t.dt)
         check("target starts and steps", bool(torch.isfinite(t.u).all()), "")
+
+
+def test_direct_interpolation_into_bigger_box(check):
+    """The campaign-default seeding: `interpolate` init pointed straight at
+    a smaller-box field maps it proportionally (a stretch, never a tile or a
+    wrap) onto the big box and projects it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = make_config_file(
+            tmp,
+            Lx=6.283185307179586,
+            Ly=3.141592653589793,
+            extra={
+                "grid": {"nx": 16, "ny": 12, "nz": 24},
+                "output": {"results_folder": f"{tmp}/seed_out"},
+            },
+        )
+        s = SLChannelFlow(config_file=cfg)
+        for _ in range(2):
+            s.step_sl_bdf2(s.dt)
+        save_flow_fields(
+            s.u,
+            s.v,
+            s.w,
+            s.p,
+            s.z_c,
+            s.z_f,
+            s.Lx,
+            s.Ly,
+            2,
+            0.02,
+            0.06,
+            0.0,
+            f"{tmp}/seed_out",
+            "seed.npz",
+        )
+        tgt = yaml.safe_load(open(cfg))
+        tgt["domain"]["Lx"] = 4 * s.Lx
+        tgt["domain"]["Ly"] = 3 * s.Ly
+        tgt["grid"] = {"nx": 40, "ny": 30, "nz": 24}
+        tgt["initialization"] = {
+            "type": "interpolate",
+            "field_file": f"{tmp}/seed_out/seed.npz",
+            "reset_time": True,
+        }
+        tgt["output"]["results_folder"] = f"{tmp}/tgt_out"
+        yaml.safe_dump(tgt, open(f"{tmp}/tgt.yaml", "w"))
+        t = SLChannelFlow(config_file=f"{tmp}/tgt.yaml")
+        t.step_sl_bdf2(t.dt)
+        check("target starts and steps", bool(torch.isfinite(t.u).all()), "")
+        check(
+            "bulk preserved after rescale",
+            abs(float(t.u[1:41, 1:31, 1:25].mean())) > 0.5,
+            f"{float(t.u.mean()):.3f}",
+        )

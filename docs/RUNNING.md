@@ -144,20 +144,22 @@ box at its true Re_tau = 934 (`configs/re950_bigbox_sl_dt020.yaml`
 documents every derived parameter). On a node with 4 GPUs:
 
 ```bash
-# 1. the converged small-box seed (Zenodo; or place the file at
-#    data/m950_seed_768x640x320.npz — the checksum verifies either way)
+# 1. the converged small-box seed (Zenodo, sha256-verified)
 python tools/fetch_data.py m950_seed
 
-# 2. tile it into the big box with a decorrelating perturbation
-python tools/tile_field.py data/m950_seed_768x640x320.npz \
-    --config configs/re950_bigbox_sl_dt020.yaml \
-    --out results/re950_bigbox_sl_dt020/seed_tiled.npz
-
-# 3. launch (the config already encodes the t+ = 2000 warm-up and the
-#    20-eddy-turnover statistics window to t_max = 440)
+# 2. launch: the solver interpolates the seed onto the big box at startup
+#    (a proportional stretch, wiped out by the encoded t+ = 2000 warm-up),
+#    then runs the 20-eddy-turnover statistics window to t_max = 440
 torchrun --nproc_per_node=4 -m parallel.production \
     configs/re950_bigbox_sl_dt020.yaml --px 2 --py 2 --backend dist --bulk local
 ```
+
+Do NOT seed a big box by tiling the periodic field: the replicas are
+perfectly correlated copies of the same small channel and contaminate
+exactly the box-scale statistics the run exists to measure.
+(`tools/tile_field.py` exists only as a fallback — tiling plus asymmetric
+perturbations — for cases where interpolation stretching is itself a
+concern; interpolation is the default.)
 
 Pause anytime with `touch results/re950_bigbox_sl_dt020/STOP`; resume by
 removing it and relaunching with `configs/re950_bigbox_sl_dt020_cont.yaml`

@@ -1,11 +1,19 @@
-"""Tile a converged channel field into a larger periodic box.
+"""Tile a converged channel field into a larger periodic box — FALLBACK
+seeding only, NOT the campaign default.
 
-Builds the initial condition for a big-box run from a small-box seed: the
-field is replicated exactly (the directions are periodic, so tiling is not
-an approximation) and a smooth solenoidal perturbation is added so the
-artificial tile periodicity decorrelates during the warm-up instead of
-persisting as a standing pattern. The z grid must match between seed and
-target (same nz, gamma, Lz).
+The default way to seed a big-box run is DIRECT INTERPOLATION: point the
+target config's `initialization: {type: interpolate}` at the small-box
+field and the solver stretches it proportionally onto the big box; the
+stretched structures are wiped out by the warm-up. Tiling, by contrast,
+fills the box with perfectly correlated periodic replicas of the same
+small channel, which contaminate the box-scale statistics a big-box run
+exists to measure. Use this tool only when interpolation stretching is
+itself a concern, and rely on its asymmetric solenoidal perturbation to
+break the replica symmetry (the half-channel-mirror approach).
+
+The field is replicated exactly (the directions are periodic, so tiling
+is not an approximation) and the perturbation is added on top. The z grid
+must match between seed and target (same nz, gamma, Lz).
 
 The output is a standard fields npz AT THE TILED RESOLUTION with the
 target box lengths; point the target config at it with
