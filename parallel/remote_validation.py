@@ -35,6 +35,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +43,12 @@ import time
 import numpy as np
 import torch
 import yaml
+
+# Triton compiles its GPU launcher with $CC at runtime; vendor compilers
+# (nvhpc's nvc, icc) reject the gcc flags it passes. Pin gcc for this
+# process and every child before torch/triton ever build anything.
+if shutil.which("gcc"):
+    os.environ["CC"] = "gcc"
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO not in sys.path:
