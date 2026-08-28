@@ -9,7 +9,8 @@ shading.
 Layout per component:
   row 1: x-z cut at mid-span
   row 2: y-z cut at mid-x
-  row 3: two x-y cuts, at z+ ~ 15 and z+ ~ 100 (heights set from u_tau)
+  row 3: two x-y cuts, at z+ ~ 15 and z+ ~ 100 (heights set from u_tau),
+         drawn at the true Lx:Ly domain proportions
 All components are plotted as fluctuations about the instantaneous x-y
 plane mean, normalised by u_tau (i.e. q'/u_tau), on the symmetric
 diverging RdBu_r map centred at 0 (decided 2026-08-28).
@@ -132,6 +133,7 @@ def main():
                 rf"${label}$, $x$--$y$ at $z^+ \approx {zp:.0f}$"
                 rf"  ($z/\delta = {z_c[k]:.3f}$)"
             )
+            ax.set_aspect("equal")
             ax.set_xlabel(r"$x/\delta$")
             ax.set_ylabel(r"$y/\delta$")
             fig.colorbar(pc, ax=ax, pad=0.02)
