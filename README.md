@@ -96,6 +96,7 @@ fuser and Triton's launcher build both fail otherwise.
 
 | | |
 |---|---|
+| `docs/RUNNING.md` | Requirements and how to run, single- and multi-GPU. |
 | `docs/CONFIG.md` | Every YAML key: type, default, meaning. |
 | `docs/ARCHITECTURE.md` | Module map, grid conventions, the scheme, and the subtleties that break silently. |
 | `docs/TESTING.md` | What each test establishes; how to add one. |
