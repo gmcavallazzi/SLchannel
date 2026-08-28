@@ -42,6 +42,9 @@ def _run_checks(rank, world):
     from parallel.decomp import Decomp
     from parallel.sl_local import LocalSL, required_halo
 
+    if os.environ.get("SLC_DIST_BACKEND") == "nccl" and torch.cuda.is_available():
+        torch.cuda.set_device(rank % torch.cuda.device_count())
+
     px, py = (2, 2) if world == 4 else (world, 1)
     order = 4
     H = required_halo(order, disp_cells=1.0, foot_depth_factor=1.0)
@@ -112,6 +115,11 @@ def main():
     torch.set_default_dtype(torch.float64)
     results = _run_checks(dist.get_rank(), dist.get_world_size())
     print(f"[rank {dist.get_rank()}] {results}", flush=True)
+    json_dir = os.environ.get("SLC_DIST_JSON_DIR")
+    if json_dir:
+        os.makedirs(json_dir, exist_ok=True)
+        with open(os.path.join(json_dir, f"rank{dist.get_rank()}.json"), "w") as fh:
+            json.dump(results, fh)
     dist.destroy_process_group()
 
 

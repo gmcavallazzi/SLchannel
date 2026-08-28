@@ -97,9 +97,23 @@ class TorchDistComm:
         self.local_ranks = [self.rank]
         self.device = torch.device(device)
         backend = dist.get_backend()
-        self.stage_device = self.device if backend == "nccl" else torch.device("cpu")
         if backend == "nccl":
-            assert self.device.type == "cuda", "NCCL needs CUDA-resident fields"
+            assert torch.cuda.is_available(), "NCCL backend needs CUDA"
+            # NCCL moves CUDA buffers only; fields may live anywhere (the
+            # staging copy brings them to the device)
+            self.stage_device = (
+                self.device if self.device.type == "cuda" else torch.device("cuda")
+            )
+            # NCCL does not support point-to-point tags; matching relies on
+            # posting order, which is deterministic here (symmetric pairs
+            # posted in the same order on both sides)
+            self.use_tags = False
+        else:
+            self.stage_device = torch.device("cpu")
+            self.use_tags = True
+
+    def _tag(self, tag):
+        return tag if self.use_tags else 0
 
     def _sendrecv(self, ext, send_sl, recv_sl, dst, src, tag):
         """Send my `send_sl` slab to dst while receiving `recv_sl` from src."""
@@ -109,8 +123,8 @@ class TorchDistComm:
         send_buf = ext[send_sl].contiguous().to(self.stage_device)
         recv_buf = torch.empty_like(send_buf)
         ops = [
-            self.dist.P2POp(self.dist.isend, send_buf, dst, tag=tag),
-            self.dist.P2POp(self.dist.irecv, recv_buf, src, tag=tag),
+            self.dist.P2POp(self.dist.isend, send_buf, dst, tag=self._tag(tag)),
+            self.dist.P2POp(self.dist.irecv, recv_buf, src, tag=self._tag(tag)),
         ]
         for req in self.dist.batch_isend_irecv(ops):
             req.wait()

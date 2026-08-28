@@ -4,6 +4,7 @@
 refs/
 
 # --- Simulation output -------------------------------------------------------
+remote_validation/
 results*/
 logs/
 figures_fix/

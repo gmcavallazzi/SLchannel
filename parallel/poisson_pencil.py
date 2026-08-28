@@ -102,8 +102,8 @@ def _exchange(comm, sendmaps, recv_shapes=None):
                 staged[peer] = send
                 shp = tuple(shapes[peer]) + ((2,) if complexes[peer] else ())
                 backs[peer] = torch.empty(shp, dtype=send.dtype, device=comm.stage_device)
-                ops.append(dist.P2POp(dist.isend, send, peer, tag=78))
-                ops.append(dist.P2POp(dist.irecv, backs[peer], peer, tag=78))
+                ops.append(dist.P2POp(dist.isend, send, peer, tag=comm._tag(78)))
+                ops.append(dist.P2POp(dist.irecv, backs[peer], peer, tag=comm._tag(78)))
             if ops:
                 for req in dist.batch_isend_irecv(ops):
                     req.wait()
@@ -124,8 +124,8 @@ def _exchange(comm, sendmaps, recv_shapes=None):
                 )
                 hdr_in = torch.empty_like(hdr_out)
                 ops = [
-                    dist.P2POp(dist.isend, hdr_out, peer, tag=76),
-                    dist.P2POp(dist.irecv, hdr_in, peer, tag=76),
+                    dist.P2POp(dist.isend, hdr_out, peer, tag=comm._tag(76)),
+                    dist.P2POp(dist.irecv, hdr_in, peer, tag=comm._tag(76)),
                 ]
                 for req in dist.batch_isend_irecv(ops):
                     req.wait()
@@ -133,8 +133,8 @@ def _exchange(comm, sendmaps, recv_shapes=None):
                     tuple(hdr_in.tolist()), dtype=send.dtype, device=comm.stage_device
                 )
                 ops = [
-                    dist.P2POp(dist.isend, send, peer, tag=77),
-                    dist.P2POp(dist.irecv, back, peer, tag=77),
+                    dist.P2POp(dist.isend, send, peer, tag=comm._tag(77)),
+                    dist.P2POp(dist.irecv, back, peer, tag=comm._tag(77)),
                 ]
                 for req in dist.batch_isend_irecv(ops):
                     req.wait()
