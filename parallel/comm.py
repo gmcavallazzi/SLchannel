@@ -49,6 +49,12 @@ class EmulatedComm:
             minus = nb["xm"] if dim == 0 else nb["ym"]
             fields[r][dst] = slabs[minus]
 
+    def scatter_nodes(self, nodes, comp):
+        """Distribute a full monolithic node array (present on the root; may
+        be None elsewhere) into per-rank extended arrays with halos filled."""
+        full = self.decomp.scatter(nodes.to(self.device), comp, fill_halos=True)
+        return {r: full[r] for r in self.local_ranks}
+
     def allgather_nodes(self, fields):
         """Assemble the global node array from owned regions; every local
         rank sees the same tensor."""
@@ -129,6 +135,25 @@ class TorchDistComm:
         plus = nb["xp"] if dim == 0 else nb["yp"]
         # my `src` slab goes to my PLUS neighbor's `dst`; I receive from minus
         self._sendrecv(ext, src, dst, plus, minus, tag=30 + dim)
+
+    def scatter_nodes(self, nodes, comp):
+        """Root (rank 0) broadcasts the full node array; every rank slices
+        its own extended block. One-time seeding path, so the full-field
+        broadcast cost is accepted for simplicity."""
+        d = self.decomp
+        nz_nodes = d.ext_shape(comp)[2]
+        if self.rank == 0:
+            assert nodes is not None, "scatter_nodes needs the full array on rank 0"
+            buf = nodes.to(torch.float64).contiguous().cpu()
+            assert buf.shape == (d.nx, d.ny, nz_nodes), (
+                f"node array for {comp!r} has shape {tuple(buf.shape)}, "
+                f"expected {(d.nx, d.ny, nz_nodes)}"
+            )
+        else:
+            buf = torch.empty(d.nx, d.ny, nz_nodes, dtype=torch.float64)
+        self.dist.broadcast(buf, src=0)
+        full = d.scatter(buf, comp, fill_halos=True)
+        return {self.rank: full[self.rank].to(self.device)}
 
     def allgather_nodes(self, fields):
         d, H = self.decomp, self.decomp.H

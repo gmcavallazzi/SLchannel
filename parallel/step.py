@@ -58,10 +58,17 @@ class DecomposedBDF2:
 
             self.tsl = {r: TritonLocalSL(self.sl[r]) for r in ranks}
         self.state = {}
-        for c in "uvw":
-            nodes = mono_node_view(getattr(mono, c), c, self.nx, self.ny)
-            full = decomp.scatter(nodes.contiguous(), c, fill_halos=True)
-            self.state[c] = {r: full[r] for r in ranks}
+        if mono.u is not None:
+            for c in "uvw":
+                nodes = mono_node_view(getattr(mono, c), c, self.nx, self.ny)
+                full = decomp.scatter(nodes.contiguous(), c, fill_halos=True)
+                self.state[c] = {r: full[r] for r in ranks}
+        else:
+            # parameters-only mono (production driver): state is seeded
+            # afterwards through set_state_nodes
+            for c in "uvw":
+                self.state[c] = {r: decomp.alloc(c, device=comm.device) for r in ranks}
+        self.p = None
         self.nm1 = None
         self.rxy_prev = None
         self.dt_prev = None
@@ -205,6 +212,7 @@ class DecomposedBDF2:
             dp_dz = (p[ox, oy, 2 : nz + 1] - p[ox, oy, 1:nz]) / self.dz_c[1:nz].view(1, 1, -1)
             w[ox, oy, 1:nz] -= dt_eff_t * dp_dz
         self._bc_exchange()
+        self.p = p_ext
         return p_ext
 
     def _bulk_forcing(self, dt):
@@ -315,7 +323,32 @@ class DecomposedBDF2:
         self.dt_prev = dt
         return self._bulk_forcing(dt)
 
-    # ---- gathering for comparisons ----
+    # ---- seeding and gathering ----
+
+    def set_state_nodes(self, nodes_by_comp):
+        """Seed u/v/w from monolithic node arrays, present on the root rank
+        only (None elsewhere under a distributed comm). Resets the BDF2
+        history, so the next step re-bootstraps — same policy as a
+        monolithic restart."""
+        for c in "uvw":
+            self.state[c] = self.comm.scatter_nodes(nodes_by_comp.get(c), c)
+        self.nm1 = None
+        self.rxy_prev = None
+        self.dt_prev = None
+        self._bc_exchange()
 
     def gather_nodes(self, comp):
         return self.d.gather(self.state[comp])
+
+    def gather_mono(self, comp):
+        """Full monolithic ghost-shaped array of a component (or the last
+        pressure for comp='p'), assembled through the communicator so it
+        works under both backends. Every rank returns the same tensor."""
+        from .decomp import nodes_to_mono
+
+        fields = self.p if comp == "p" else self.state[comp]
+        if fields is None:
+            return None
+        full = self.comm.allgather_nodes(fields)
+        nodes = full[self.comm.local_ranks[0]]
+        return nodes_to_mono(nodes, "p" if comp == "p" else comp, self.nx, self.ny)

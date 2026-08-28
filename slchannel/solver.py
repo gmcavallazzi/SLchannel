@@ -135,13 +135,21 @@ class SLChannelFlow:
     >>> flow.run_simulation()
     """
 
-    def __init__(self, config_file="config.yaml"):
+    def __init__(self, config_file="config.yaml", allocate_fields=True):
         """Build a solver from a YAML configuration file.
 
         Parameters
         ----------
         config_file : str
             Path to the YAML configuration. See docs/CONFIG.md for the keys.
+        allocate_fields : bool
+            When False, build a parameters-only instance: grid, transport
+            coefficients, FFT solver, SL advector and statistics are all
+            constructed, but no 3D field is allocated or initialized
+            (``u = v = w = p = None``) and nothing is written to the results
+            folder. Used by the decomposed production driver, where each
+            rank holds only its own subdomain and full-size fields must
+            never be materialized per process.
 
         Notes
         -----
@@ -284,15 +292,17 @@ class SLChannelFlow:
         # each threshold (jitter <= dt). 0 disables.
         self.t_snapshot = output_config.get("t_snapshot", 0.0)
         self._next_snap_time = None
+        self.allocate_fields = allocate_fields
         os.makedirs(self.results_folder, exist_ok=True)
-        self._mark_results_folder()
+        if allocate_fields:
+            self._mark_results_folder()
 
         field_file = config["initialization"].get("field_file", None)
         init_type_cfg = config["initialization"].get("type", "parabolic")
         is_restart = field_file is not None and init_type_cfg != "interpolate"
 
         clean_results = output_config.get("clean_results_on_fresh_start", False)
-        if not is_restart and clean_results:
+        if allocate_fields and not is_restart and clean_results:
             self._clean_results_folder()
 
         torch.set_default_dtype(torch.float64)
@@ -310,14 +320,22 @@ class SLChannelFlow:
         self.cell_vol_ratio = self.cell_vol
         self.total_volume = self.Lx * self.Ly * self.Lz
 
-        save_grid_csv(self.z_f, self.z_c, self.dz_f, self.dz_c, self.nz, self.results_folder)
-        plot_grid(self.z_f, self.z_c, self.results_folder)
+        if allocate_fields:
+            save_grid_csv(self.z_f, self.z_c, self.dz_f, self.dz_c, self.nz, self.results_folder)
+            plot_grid(self.z_f, self.z_c, self.results_folder)
 
         # Initialize flow
-        print("Initializing flow...", flush=True)
+        if allocate_fields:
+            print("Initializing flow...", flush=True)
         reset_time = config["initialization"].get("reset_time", False)
 
-        if is_restart:
+        if not allocate_fields:
+            self.u = self.v = self.w = self.p = None
+            self.forcing = 0.0
+            self.initial_step = 0
+            self.time = 0.0
+            self.initial_time = 0.0
+        elif is_restart:
             self.u, self.v, self.w, self.p, self.initial_step, self.time = (
                 initialize_flow_from_file(field_file, device=self.device, reset_time=reset_time)
             )
@@ -376,13 +394,13 @@ class SLChannelFlow:
             self.initial_time = 0.0
 
         # Rescale u to match U_bulk exactly (fresh/interpolated starts only)
-        if field_file is None or init_type_cfg == "interpolate":
+        if allocate_fields and (field_file is None or init_type_cfg == "interpolate"):
             u_bulk_init = compute_bulk_velocity(self.u, self.cell_vol_ratio, self.total_volume)
             if abs(u_bulk_init) > 1e-9:
                 self.u *= self.U_bulk / u_bulk_init
             else:
                 print("WARNING: Initial bulk velocity is zero. Skipping rescaling.", flush=True)
-        else:
+        elif allocate_fields:
             print("Restarting from file: Skipping velocity rescaling.", flush=True)
 
         # Poisson solver: FFT in the periodic x,y + tridiagonal solve in z.
@@ -534,6 +552,30 @@ class SLChannelFlow:
             self.turbulence_stats = None
 
         # Save initial fields
+        if allocate_fields:
+            self._save_and_project_initial()
+
+        # AB2 buffers for the Eulerian reference scheme
+        self.rhs_u_prev = None
+        self.rhs_v_prev = None
+        self.rhs_w_prev = None
+        self.rhs_u_curr = None
+        self.rhs_v_curr = None
+        self.rhs_w_curr = None
+
+        self.time = self.initial_time
+        self.current_step = self.initial_step
+
+        # Optional CUDA-graph capture of the FFT-Poisson solve (torChannel's
+        # machinery, unchanged; the SL region itself is NOT graphable — it
+        # builds index tensors)
+        self._pgraph = None
+        self._pg_cudagraph = env.USE_POISSON_CUDAGRAPH and self.device.type == "cuda"
+
+    def _save_and_project_initial(self):
+        """Write fields_init.npz and project the initial field to be
+        discretely divergence-free (split out of __init__ so the
+        parameters-only construction can skip it)."""
         u_tau_init = compute_u_tau(
             self.u, self.z_c, self.nu, top_wall_bc_type=self.top_wall_bc_type
         )
@@ -581,23 +623,6 @@ class SLChannelFlow:
             f"Initial divergence after projection: max(|div|) = {torch.max(torch.abs(div_final)):.6e}",
             flush=True,
         )
-
-        # AB2 buffers for the Eulerian reference scheme
-        self.rhs_u_prev = None
-        self.rhs_v_prev = None
-        self.rhs_w_prev = None
-        self.rhs_u_curr = None
-        self.rhs_v_curr = None
-        self.rhs_w_curr = None
-
-        self.time = self.initial_time
-        self.current_step = self.initial_step
-
-        # Optional CUDA-graph capture of the FFT-Poisson solve (torChannel's
-        # machinery, unchanged; the SL region itself is NOT graphable — it
-        # builds index tensors)
-        self._pgraph = None
-        self._pg_cudagraph = env.USE_POISSON_CUDAGRAPH and self.device.type == "cuda"
 
     def _poisson_fft_graphed(self, rhs):
         """Replay (or first capture) the FFT-Poisson solve as a CUDA graph."""
