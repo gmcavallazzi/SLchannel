@@ -38,8 +38,23 @@ REPO = os.path.dirname(HERE)
 DATA = os.path.join(REPO, "data")
 
 MKM_BASE = "https://turbulence.oden.utexas.edu/data/MKM"
+LM_BASE = "https://turbulence.oden.utexas.edu/channel2015/data"
 
 DATASETS = {
+    "lm1000": dict(
+        kind="lm",
+        retau=1000,
+        dest="reference/lm1000",
+        cite=("M. Lee & R. D. Moser, J. Fluid Mech. 774, 395 (2015)."),
+        note="Reference DNS profiles at Re_tau = 1000.5 (8pi x 3pi box).",
+    ),
+    "lm2000": dict(
+        kind="lm",
+        retau=2000,
+        dest="reference/lm2000",
+        cite=("M. Lee & R. D. Moser, J. Fluid Mech. 774, 395 (2015)."),
+        note="Reference DNS profiles at Re_tau = 1994.8 (8pi x 3pi box).",
+    ),
     "mkm180": dict(
         kind="mkm",
         retau=180,
@@ -151,6 +166,71 @@ def fetch_mkm(spec):
     return out
 
 
+def fetch_lm(spec):
+    """Download the Lee & Moser (2015) profiles and write axis-remapped CSVs.
+
+    The mean and fluctuation files are tabulated on DIFFERENT wall-normal
+    grids, so they are written as two CSVs rather than zipped into one.
+    LM's y is wall-normal and z spanwise, so as with MKM the stresses are
+    remapped: their v'v' (wall-normal) -> ww, w'w' (spanwise) -> vv,
+    u'v' -> uw. Everything is already in + units in the source files.
+    """
+    retau = spec["retau"]
+    tmp = os.path.join(DATA, "_lm_raw")
+    os.makedirs(tmp, exist_ok=True)
+
+    mean = download(f"{LM_BASE}/LM_Channel_{retau}_mean_prof.dat", os.path.join(tmp, "mean"))
+    fluc = download(f"{LM_BASE}/LM_Channel_{retau}_vel_fluc_prof.dat", os.path.join(tmp, "fluc"))
+
+    def read(path):
+        rows = []
+        for line in open(path):
+            line = line.strip()
+            if not line or line[0] in "#%":
+                continue
+            try:
+                rows.append([float(v) for v in line.split()])
+            except ValueError:
+                continue
+        return rows
+
+    mean_rows, fluc_rows = read(mean), read(fluc)
+    if not mean_rows or not fluc_rows:
+        sys.exit("could not parse the downloaded Lee-Moser profiles")
+
+    out_base = os.path.join(DATA, spec["dest"])
+    os.makedirs(os.path.dirname(out_base), exist_ok=True)
+
+    # LM mean: y/delta  y+  U+  dU+/dy  W+  P
+    out = out_base + "_mean.csv"
+    with open(out, "w") as fh:
+        fh.write(f"# Lee-Moser Re_tau={retau} mean profile, from {LM_BASE}\n")
+        fh.write(f"# {spec['cite']}\n")
+        fh.write("# Reference y (wall-normal) -> slChannel z.\n")
+        fh.write("z_delta,z_plus,U_plus\n")
+        for r in mean_rows:
+            fh.write(f"{r[0]:.6e},{r[1]:.6e},{r[2]:.6e}\n")
+    print(f"  wrote {out} ({len(mean_rows)} points)")
+
+    # LM fluc: y/delta  y+  u'u'  v'v'  w'w'  u'v'  u'w'  v'w'  k  (all +)
+    out = out_base + "_fluc.csv"
+    with open(out, "w") as fh:
+        fh.write(f"# Lee-Moser Re_tau={retau} velocity fluctuations, from {LM_BASE}\n")
+        fh.write(f"# {spec['cite']}\n")
+        fh.write("# Axes remapped to slChannel's convention: reference y (wall-normal)\n")
+        fh.write("#   -> z, reference v'v' -> ww, w'w' -> vv, u'v' -> uw.\n")
+        fh.write("z_delta,z_plus,uu_plus,vv_plus,ww_plus,uw_plus\n")
+        for r in fluc_rows:
+            uu, vv_wn, ww_sp, uv = r[2], r[3], r[4], r[5]
+            fh.write(f"{r[0]:.6e},{r[1]:.6e},{uu:.6e},{ww_sp:.6e},{vv_wn:.6e},{uv:.6e}\n")
+    print(f"  wrote {out} ({len(fluc_rows)} points)")
+
+    for f in (mean, fluc):
+        os.remove(f)
+    os.rmdir(tmp)
+    return out_base
+
+
 def fetch_zenodo(name, spec):
     if not spec.get("url"):
         sys.exit(
@@ -196,6 +276,8 @@ def main():
         print(f"{name}: {spec['note']}")
         if spec["kind"] == "mkm":
             fetch_mkm(spec)
+        elif spec["kind"] == "lm":
+            fetch_lm(spec)
         else:
             fetch_zenodo(name, spec)
         print(f"  cite: {spec['cite']}\n")

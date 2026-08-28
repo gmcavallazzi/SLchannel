@@ -1,0 +1,74 @@
+# Full channel at Re_tau = 2000 in the Lee & Moser (2015) 8pi x 3pi box,
+# targeting their Re_tau = 1994.756 case (JFM 774, 395).
+#
+# Every flow parameter is taken from the LM_Channel_2000 data headers
+# (fetch with `python tools/fetch_data.py lm2000`):
+#   nu = 2.3e-5, U_bulk = 1, delta = 1  ->  Re = 1/nu = 43478.26
+#   u_tau = 4.58794e-2, Re_tau = 1994.756
+# dt for dt+ = 0.2:  dt = 0.2 nu/u_tau^2 = 0.2/91.52 = 2.185e-3
+#
+# Grid (LM used 4096 x 3072 x 768 B-splines, dx+ = 12.2, dz+(span) = 6.1):
+#   nx = 6912 -> dx+ = 8pi Re_tau/6912 = 7.25
+#   ny = 4096 -> dy+ = 3pi Re_tau/4096 = 4.59
+#   nz =  640, gamma 2.6 -> dz+ = 0.361 (wall) .. 16.4 (centre)
+#
+# SIZE WARNING: 6912 x 4096 x 640 = 1.81e10 points = 145 GB per fp64 field.
+# With the solver's resident state (~20-25 fields) this is a ~3 TB job:
+# NOT runnable on a 4-GPU node. It documents the target; run
+# configs/lm1000_sl_dt020.yaml first.
+#
+# Seeding: no field at this box size exists yet. The M950 field must be
+# tiled 4x3 in x,y with a decorrelating perturbation (tool to be written),
+# or the run started from scratch through a long transient.
+
+advection:
+  scheme: sl
+boundary_conditions:
+  top_wall:
+    type: dirichlet
+compute:
+  device: auto
+domain:
+  Lx: 25.132741228718345
+  Ly: 9.42477796076938
+  Lz: 2.0
+  stretching_type: symmetric
+flow:
+  Re: 43478.26086956522
+  Re_tau: 1994.756
+  U_bulk: 1.0
+  gamma: 2.6
+grid:
+  nx: 6912
+  ny: 4096
+  nz: 640
+output:
+  n_out: 50
+  n_save: 500
+  results_folder: results/lm2000_sl_dt020
+  t_snapshot: 50.0
+sl:
+  bdf2_pressure: noninc
+  interp_dtype: fp32_accum64
+  interp_order: 6
+  n_traj_iters: 2
+  traj_interp_order: 2
+solver:
+  type: fft
+statistics:
+  enabled: true
+  n_stats: 10
+  output_file: turbulence_stats.npz
+  state_file: turbulence_stats_state.npz
+  t_stats: 100.0   # placeholder: set from the dpdx flattening criterion
+  z_plus_target: 15.0
+time:
+  CFL_target: 3.0
+  dt: 0.0005
+  dt_max: 0.002185
+  dt_min: 0.0001
+  dt_update_interval: 10
+  n_steps: 2000000000
+  scheme: IMEX
+  # one eddy turnover h/u_tau = 21.8 t.u.; 20 turnovers of stats = 436 t.u.
+  t_max: 550.0

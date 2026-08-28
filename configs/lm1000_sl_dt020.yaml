@@ -1,0 +1,74 @@
+# Full channel at Re_tau = 1000 in the Lee & Moser (2015) 8pi x 3pi box,
+# targeting their Re_tau = 1000.512 case (JFM 774, 395) — the realistic
+# first big-box multi-GPU production case.
+#
+# Every flow parameter is taken from the LM_Channel_1000 data headers
+# (fetch with `python tools/fetch_data.py lm1000`):
+#   nu = 5.0e-5, U_bulk = 1, delta = 1  ->  Re = 1/nu = 20000
+#   u_tau = 5.00256e-2, Re_tau = 1000.512
+# dt for dt+ = 0.2:  dt = 0.2 nu/u_tau^2 = 0.2/50.05 = 3.996e-3
+#
+# Grid (LM used 2304 x 2048 x 512 B-splines, dx+ = 10.9, dz+(span) = 4.6):
+#   nx = 3456 -> dx+ = 8pi Re_tau/3456 = 7.28
+#   ny = 2048 -> dy+ = 3pi Re_tau/2048 = 4.60
+#   nz =  320, gamma 2.6 -> dz+ = 0.365 (wall) .. 16.4 (centre)
+#
+# Size: 3456 x 2048 x 320 = 2.27e9 points = 18.1 GB per fp64 field.
+# With ~20-25 resident fields this is a ~350-450 GB job: fits a 4x H200
+# (141 GB) node with the pencil decomposition, tight-to-no on 4x 80 GB.
+# Calibrate the multiplier with a short smoke run before committing.
+#
+# Seeding: tile the converged M950 field (2pi x pi) 4x in x, 3x in y with
+# a decorrelating perturbation (tool to be written), then interpolate.
+
+advection:
+  scheme: sl
+boundary_conditions:
+  top_wall:
+    type: dirichlet
+compute:
+  device: auto
+domain:
+  Lx: 25.132741228718345
+  Ly: 9.42477796076938
+  Lz: 2.0
+  stretching_type: symmetric
+flow:
+  Re: 20000.0
+  Re_tau: 1000.512
+  U_bulk: 1.0
+  gamma: 2.6
+grid:
+  nx: 3456
+  ny: 2048
+  nz: 320
+output:
+  n_out: 50
+  n_save: 500
+  results_folder: results/lm1000_sl_dt020
+  t_snapshot: 50.0
+sl:
+  bdf2_pressure: noninc
+  interp_dtype: fp32_accum64
+  interp_order: 6
+  n_traj_iters: 2
+  traj_interp_order: 2
+solver:
+  type: fft
+statistics:
+  enabled: true
+  n_stats: 10
+  output_file: turbulence_stats.npz
+  state_file: turbulence_stats_state.npz
+  t_stats: 100.0   # placeholder: set from the dpdx flattening criterion
+  z_plus_target: 15.0
+time:
+  CFL_target: 3.0
+  dt: 0.001
+  dt_max: 0.003996
+  dt_min: 0.0001
+  dt_update_interval: 10
+  n_steps: 2000000000
+  scheme: IMEX
+  # one eddy turnover h/u_tau = 20.0 t.u.; 20 turnovers of stats = 400 t.u.
+  t_max: 500.0
