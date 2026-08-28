@@ -166,6 +166,13 @@ removing it and relaunching with `configs/re950_bigbox_sl_dt020_cont.yaml`
 (same command, different config), which restarts from the checkpoint and
 keeps accumulating the same statistics window.
 
+On a PBSPro cluster, `examples/pbs/run_re950_bigbox.pbs` wraps all of the
+above into a self-chaining job (seed fetch, first-launch vs continuation
+config, STOP-file hold, resubmission until complete) — edit the EDIT-ME
+blocks for the site's resources, environment and paths, then
+`mkdir -p logs && qsub examples/pbs/run_re950_bigbox.pbs` from the repo
+root.
+
 Figures and validation numbers, whenever statistics exist:
 
 ```bash

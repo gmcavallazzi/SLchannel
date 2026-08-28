@@ -1,0 +1,85 @@
+#!/bin/bash
+# Re950 big-box production run (8pi x 3pi, Re_tau = 934) on a PBSPro
+# cluster — one node, 4 GPUs, one NCCL rank per GPU. Self-chaining: each
+# job runs one walltime segment and resubmits itself until the run
+# completes (fields_final.npz) or is paused (STOP file).
+#
+# EDIT the four blocks marked EDIT-ME (resources, environment, repo path),
+# then from the repository root:
+#
+#     mkdir -p logs        # once; PBS needs the -o directory to exist
+#     qsub examples/pbs/run_re950_bigbox.pbs
+#
+# Pause:   touch results/re950_bigbox_sl_dt020/STOP   (job checkpoints and
+#          exits; the chain holds). Resume: rm the STOP file and qsub again.
+# Status:  tail -f logs/re950_bigbox.o* ; the timeseries lives in
+#          results/re950_bigbox_sl_dt020/timeseries.npz.
+#
+# ---- EDIT-ME: resources -----------------------------------------------------
+#PBS -N re950_bigbox
+#PBS -l select=1:ncpus=32:mem=512gb:ngpus=4:gpu_type=A100
+#PBS -l walltime=24:00:00
+##PBS -q <queue>                    # uncomment and set if your site needs it
+#PBS -j oe
+#PBS -o logs/
+
+set -uo pipefail
+
+# ---- EDIT-ME: repository location -------------------------------------------
+# Absolute path to the SLchannel clone (PBS jobs do not inherit the submit
+# directory as cwd; $PBS_O_WORKDIR is where qsub ran, which is fine if you
+# always submit from the repo root).
+REPO="${PBS_O_WORKDIR:-$HOME/SLchannel}"
+cd "$REPO"
+mkdir -p logs
+
+# ---- EDIT-ME: python environment --------------------------------------------
+# Anything that provides python >= 3.10 with a CUDA build of torch >= 2.1
+# (see docs/RUNNING.md; `pip install torch` in a venv is enough — CUDA
+# runtime and NCCL are bundled, no cuda/nvhpc modules needed).
+# module load python
+# source $HOME/slc-env/bin/activate
+
+# ---- EDIT-ME: run geometry --------------------------------------------------
+NGPUS=4
+PX=2
+PY=2
+
+# -----------------------------------------------------------------------------
+export CC=gcc                # Triton builds its launcher with $CC; vendor
+                             # compilers (nvhpc's nvc) break it
+export SLC_DIST_BACKEND=nccl
+
+RES=results/re950_bigbox_sl_dt020
+
+if [ -f "$RES/STOP" ]; then
+    echo "STOP file present -- run held (rm $RES/STOP to resume)"
+    exit 0
+fi
+if [ -f "$RES/fields_final.npz" ]; then
+    echo "run already complete, nothing to do"
+    exit 0
+fi
+
+# seed field (idempotent: verified by checksum, downloaded only if missing)
+python tools/fetch_data.py m950_seed || exit 1
+
+# first launch interpolates the seed; continuations restart from the
+# checkpoint and keep accumulating the same statistics window
+if [ -f "$RES/fields.npz" ]; then
+    CFG=configs/re950_bigbox_sl_dt020_cont.yaml
+else
+    CFG=configs/re950_bigbox_sl_dt020.yaml
+fi
+
+echo "=== segment start $(date '+%F %T')  config=$CFG"
+torchrun --nproc_per_node=$NGPUS -m parallel.production "$CFG" \
+    --px $PX --py $PY --backend dist --bulk local
+rc=$?
+echo "=== segment end rc=$rc $(date '+%F %T')"
+
+# chain the next segment unless the run finished, was paused, or crashed
+if [ ! -f "$RES/fields_final.npz" ] && [ ! -f "$RES/STOP" ] && [ $rc -eq 0 ]; then
+    echo "resubmitting next segment"
+    qsub "$REPO/examples/pbs/run_re950_bigbox.pbs"
+fi
