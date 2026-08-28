@@ -157,3 +157,29 @@ def test_params_only_solver(check):
             "",
         )
         check("dtype default set", torch.get_default_dtype() == torch.float64, "")
+
+
+def test_local_bulk_reduction_equivalent(check):
+    """bulk='local' (allreduced partial sums, no per-step allgather) against
+    bulk='gathered': same value to reduction-order rounding, so short-horizon
+    fields stay within amplified-epsilon of the gathered trajectory."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_g = _cfg(tmp, "bg.yaml", "out_bg")
+        cfg_l = _cfg(tmp, "bl.yaml", "out_bl")
+        run_g = ProductionRun(cfg_g, 2, 2, backend="emulated", poisson="pencil", triton=False)
+        run_l = ProductionRun(
+            cfg_l, 2, 2, backend="emulated", poisson="pencil", triton=False, bulk="local"
+        )
+        res_g, res_l = run_g.run(), run_l.run()
+        check("both completed", res_g["step"] == res_l["step"] == N_STEPS, "")
+        for c in "uvw":
+            err = float((run_g.dec.gather_nodes(c) - run_l.dec.gather_nodes(c)).abs().max())
+            check(
+                f"local-vs-gathered field {c}",
+                err <= 1e-10,
+                f"max|diff|={err:.3e} (reduction-order epsilon, amplified over {N_STEPS} steps)",
+            )
+        ts_g = np.load(os.path.join(tmp, "out_bg", "timeseries.npz"))
+        ts_l = np.load(os.path.join(tmp, "out_bl", "timeseries.npz"))
+        du = float(np.abs(ts_g["u_bulk"] - ts_l["u_bulk"]).max())
+        check("u_bulk agreement", du <= 1e-12, f"max|diff|={du:.3e}")

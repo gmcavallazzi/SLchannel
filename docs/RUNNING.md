@@ -104,7 +104,26 @@ pytest parallel/tests                              # emulated backend, CPU
 torchrun --nproc_per_node=2 parallel/run_dist_test.py   # real multi-process (gloo)
 ```
 
-To run the full-physics replication case (4 ranks emulated, one GPU):
+To run a production case decomposed — same config file, same outputs
+(timeseries.npz, mono-format fields.npz checkpoints, STOP pause,
+statistics) as the single-GPU solver:
+
+```bash
+# all ranks emulated in one process (any device; validation and smoke runs)
+python -m parallel.production configs/case.yaml --px 2 --py 2
+
+# one process per rank; gloo by default, NCCL via SLC_DIST_BACKEND=nccl
+torchrun --nproc_per_node=4 -m parallel.production configs/case.yaml \
+    --px 2 --py 2 --backend dist --bulk local
+```
+
+`--bulk gathered` (default) reproduces the monolithic solver bit-for-bit
+but allgathers the streamwise field every step; `--bulk local` allreduces
+rank-local partial sums instead and is the right choice on real
+multi-GPU hardware (statistically identical, not bitwise). Checkpoints
+are interchangeable with the monolithic solver in both directions.
+
+To reproduce the Re180 statistical-equivalence study:
 
 ```bash
 python parallel/run_re180_4rank.py --mode 4rank --px 2 --py 2 \
@@ -113,7 +132,8 @@ python parallel/run_re180_4rank.py --mode mono --out results/re180_mono
 python parallel/compare_re180.py results/re180_4rank results/re180_mono
 ```
 
-For production science today, use the single-GPU path.
+Multi-node NCCL is not wired up yet; single-node multi-GPU via torchrun
+is the supported deployment.
 
 ## Troubleshooting
 

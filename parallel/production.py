@@ -78,7 +78,16 @@ def _bcast_scalar(x):
 
 
 class ProductionRun:
-    def __init__(self, config_file, px, py, backend="emulated", poisson="pencil", triton=None):
+    def __init__(
+        self,
+        config_file,
+        px,
+        py,
+        backend="emulated",
+        poisson="pencil",
+        triton=None,
+        bulk="gathered",
+    ):
         self.backend = backend
         self.is_root = True
         rank = 0
@@ -132,7 +141,9 @@ class ProductionRun:
             }
             # the driver owns the fields from here; free the monolithic copies
             mono.u = mono.v = mono.w = mono.p = None
-        self.dec = DecomposedBDF2(mono, self.d, self.comm, poisson=poisson, use_triton=use_triton)
+        self.dec = DecomposedBDF2(
+            mono, self.d, self.comm, poisson=poisson, use_triton=use_triton, bulk=bulk
+        )
         self.dec.set_state_nodes(seed if seed is not None else {})
         del seed
 
@@ -142,7 +153,7 @@ class ProductionRun:
             print(
                 f"[production] {px}x{py} ranks ({backend}), H={H} "
                 f"(disp {disp:.2f} cells/dt incl. x{HALO_SAFETY} margin, "
-                f"order {mono.sl.order}), poisson={poisson}, triton={use_triton}",
+                f"order {mono.sl.order}), poisson={poisson}, triton={use_triton}, bulk={bulk}",
                 flush=True,
             )
 
@@ -379,6 +390,14 @@ def main(argv=None):
     ap.add_argument("--backend", choices=["emulated", "dist"], default="emulated")
     ap.add_argument("--poisson", choices=["pencil", "gathered"], default="pencil")
     ap.add_argument("--no-triton", action="store_true")
+    ap.add_argument(
+        "--bulk",
+        choices=["gathered", "local"],
+        default="gathered",
+        help="bulk-velocity reduction: 'gathered' is bit-identical to the "
+        "monolithic solver but allgathers every step; 'local' allreduces "
+        "rank-local partial sums (the production choice on real multi-GPU)",
+    )
     args = ap.parse_args(argv)
 
     if args.backend == "dist":
@@ -394,6 +413,7 @@ def main(argv=None):
         backend=args.backend,
         poisson=args.poisson,
         triton=False if args.no_triton else None,
+        bulk=args.bulk,
     )
     run.run()
 

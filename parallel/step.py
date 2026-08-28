@@ -30,10 +30,16 @@ from .sl_local import LocalSL
 
 
 class DecomposedBDF2:
-    def __init__(self, mono, decomp, comm, poisson="gathered", use_triton=False):
+    def __init__(self, mono, decomp, comm, poisson="gathered", use_triton=False, bulk="gathered"):
         """Seed from a monolithic SLChannelFlow instance (grid, transport
         coefficients, fft_data and the reference advector all come from it;
-        its current u/v/w become the initial state)."""
+        its current u/v/w become the initial state).
+
+        bulk: 'gathered' reduces the bulk velocity on the allgathered field
+        with production's own reduction order (bit-identical to the
+        monolithic solver, but a full-field allgather EVERY step);
+        'local' sums each rank's owned faces and allreduces (same value to
+        ~1e-15, no allgather — the production choice on real multi-GPU)."""
         from .decomp import mono_node_view
 
         self.d = decomp
@@ -49,6 +55,8 @@ class DecomposedBDF2:
         self.ref = mono.sl
         assert poisson in ("gathered", "pencil")
         self.poisson = poisson
+        assert bulk in ("gathered", "local")
+        self.bulk = bulk
 
         ranks = comm.local_ranks
         self.sl = {r: LocalSL(self.ref, decomp, r) for r in ranks}
@@ -217,20 +225,38 @@ class DecomposedBDF2:
 
     def _bulk_forcing(self, dt):
         """Exact-flux uniform shift (fork of _apply_bulk_forcing,
-        solver.py:669-698). The volume sum runs on the GATHERED monolithic
-        field with production's own compute_bulk_velocity, so the reduction
-        order -- and therefore every subsequent step -- is bit-identical to
-        the single-GPU solver. (A rank-local sum + allreduce differs at the
-        1e-16 level, which chaotic amplification turns into full field
-        decorrelation over O(100) time units.)"""
-        from .decomp import nodes_to_mono
+        solver.py:669-698). bulk='gathered': the volume sum runs on the
+        GATHERED monolithic field with production's own
+        compute_bulk_velocity, so the reduction order -- and therefore every
+        subsequent step -- is bit-identical to the single-GPU solver.
+        bulk='local': each rank sums its owned faces and the partial sums
+        are allreduced -- no allgather; every rank applies the identical
+        correction (collectives return the same bits on every rank), but the
+        reduction order differs from the monolithic solver at the 1e-16
+        level, which chaotic amplification turns into full field
+        decorrelation over O(100) time units (statistics unaffected)."""
+        H, nxl, nyl, nz = self.d.H, self.d.nxl, self.d.nyl, self.nz
+        if self.bulk == "local":
+            w = (self.dx * self.dy) * self.dz_f.view(1, 1, -1)
+            partial = {
+                r: (self.state["u"][r][H : H + nxl, H : H + nyl, 1 : nz + 1] * w).sum()
+                for r in self.comm.local_ranks
+            }
+            total = self.comm.allreduce(partial, op="sum")
+            for r in self.comm.local_ranks:
+                # float() so the correction is a device-agnostic scalar; the
+                # allreduce returns the same bits on every rank
+                corr = self.U_bulk - float(total[r]) / self.total_volume
+                self.state["u"][r] += corr
+        else:
+            from .decomp import nodes_to_mono
 
-        full = self.comm.allgather_nodes(self.state["u"])
-        for r in self.comm.local_ranks:
-            u_mono = nodes_to_mono(full[r], "u", self.nx, self.ny)
-            u_bulk = compute_bulk_velocity(u_mono, self.cell_vol_ratio, self.total_volume)
-            corr = self.U_bulk - u_bulk
-            self.state["u"][r] += corr
+            full = self.comm.allgather_nodes(self.state["u"])
+            for r in self.comm.local_ranks:
+                u_mono = nodes_to_mono(full[r], "u", self.nx, self.ny)
+                u_bulk = compute_bulk_velocity(u_mono, self.cell_vol_ratio, self.total_volume)
+                corr = self.U_bulk - u_bulk
+                self.state["u"][r] += corr
         self._bc_exchange(("u",))
         return corr / dt
 

@@ -16,9 +16,13 @@ Replaces the gather-based solve with group all-to-all transposes on the
 Numerics: torch.fft.rfft2(dim=(0, 1)) is replaced by rfft(y) followed by
 fft(x) -- mathematically identical, so the result matches the monolithic
 solver to rounding (~1e-12 relative), not bitwise. Three transposes per
-direction is the correctness-first arrangement; a production version would
-restructure to two (or adopt cuDecomp). Constraints: nz % py == 0 and
-nx % py == 0 (asserted).
+direction is STRUCTURAL from a z-pencil start: each FFT direction needs
+one transpose and the Thomas solve needs full z back; the only way below
+three is a distributed (Wang-partition) tridiagonal solve, worth doing
+only if a hardware profile shows the transposes dominating. All
+sends/recvs of a transpose are posted in one batch with shapes
+precomputed from the plan. Constraints: nz % py == 0 and nx % py == 0
+(asserted).
 
 Complex tensors are moved through the communicator as real (..., 2) views so
 the gloo backend never sees complex dtypes.
@@ -60,16 +64,53 @@ class PencilPlan:
         _, cy = self.d.coords(rank)
         return [self.d.rank_of(i, cy) for i in range(self.d.px)]
 
+    def kyc(self, rank):
+        """This rank's ky-chunk length (set by its row position)."""
+        cx, _ = self.d.coords(rank)
+        return self.ky_chunks[cx][1]
 
-def _exchange(comm, sendmaps):
+
+def _exchange(comm, sendmaps, recv_shapes=None):
     """sendmaps: dict src_rank -> dict dst_rank -> tensor. Returns dict
     dst_rank -> dict src_rank -> tensor (local ranks only). Complex tensors
-    are staged as real views for the distributed backend."""
+    are staged as real views for the distributed backend.
+
+    recv_shapes: dict local_rank -> dict src_rank -> tuple, the tensor shape
+    each peer will send (blocks can be shape-asymmetric through the uneven
+    ky chunks). When given, every send/recv is posted in ONE
+    batch_isend_irecv — no per-peer serialization. Without it, a shape
+    header handshake runs per peer (kept as the fallback)."""
     if hasattr(comm, "dist"):  # TorchDistComm
         dist, me = comm.dist, comm.rank
         my = sendmaps[me]
         recv = {}
         peers = sorted(my)
+        if recv_shapes is not None:
+            shapes = recv_shapes[me]
+            ops, staged, backs, complexes = [], {}, {}, {}
+            for peer in peers:
+                t = my[peer]
+                complexes[peer] = t.is_complex()
+                send = (
+                    (torch.view_as_real(t) if complexes[peer] else t)
+                    .contiguous()
+                    .to(comm.stage_device)
+                )
+                if peer == me:
+                    backs[peer] = send.clone()
+                    continue
+                staged[peer] = send
+                shp = tuple(shapes[peer]) + ((2,) if complexes[peer] else ())
+                backs[peer] = torch.empty(shp, dtype=send.dtype, device=comm.stage_device)
+                ops.append(dist.P2POp(dist.isend, send, peer, tag=78))
+                ops.append(dist.P2POp(dist.irecv, backs[peer], peer, tag=78))
+            if ops:
+                for req in dist.batch_isend_irecv(ops):
+                    req.wait()
+            for peer in peers:
+                back = backs[peer].to(my[peer].device)
+                recv[peer] = torch.view_as_complex(back) if complexes[peer] else back
+            return {me: recv}
         for peer in peers:
             t = my[peer]
             is_c = t.is_complex()
@@ -77,8 +118,7 @@ def _exchange(comm, sendmaps):
             if peer == me:
                 back = send.clone()
             else:
-                # blocks can be shape-asymmetric (uneven ky chunks):
-                # exchange the shape header first, then the payload
+                # shape header handshake, then the payload
                 hdr_out = torch.tensor(
                     list(send.shape), dtype=torch.int64, device=comm.stage_device
                 )
@@ -112,12 +152,14 @@ def _exchange(comm, sendmaps):
 def _fwd(plan, comm, div_local):
     """Owned divergence blocks -> spectral z-pencil blocks per local rank.
     Returns dict rank -> (nxs, nky_c, nz) complex."""
+    d = plan.d
     # 1. z -> y within the column group (peer j takes z chunk j)
     send = {}
     for r, blk in div_local.items():
         cg = plan.col_group(r)
         send[r] = {peer: blk[:, :, j * plan.nzb : (j + 1) * plan.nzb] for j, peer in enumerate(cg)}
-    recv = _exchange(comm, send)
+    shapes = {r: {peer: (d.nxl, d.nyl, plan.nzb) for peer in plan.col_group(r)} for r in div_local}
+    recv = _exchange(comm, send, shapes)
     ypen = {}
     for r in recv:
         cg = plan.col_group(r)
@@ -132,7 +174,8 @@ def _fwd(plan, comm, div_local):
             peer: fy[:, off : off + cnt, :].contiguous()
             for (off, cnt), peer in zip(plan.ky_chunks, rg)
         }
-    recv = _exchange(comm, send)
+    shapes = {r: {peer: (d.nxl, plan.kyc(r), plan.nzb) for peer in plan.row_group(r)} for r in ypen}
+    recv = _exchange(comm, send, shapes)
     xpen = {}
     for r in recv:
         rg = plan.row_group(r)
@@ -147,7 +190,10 @@ def _fwd(plan, comm, div_local):
             peer: fx[j * plan.nxs : (j + 1) * plan.nxs, :, :].contiguous()
             for j, peer in enumerate(cg)
         }
-    recv = _exchange(comm, send)
+    shapes = {
+        r: {peer: (plan.nxs, plan.kyc(r), plan.nzb) for peer in plan.col_group(r)} for r in xpen
+    }
+    recv = _exchange(comm, send, shapes)
     spec = {}
     for r in recv:
         cg = plan.col_group(r)
@@ -166,7 +212,10 @@ def _bwd(plan, comm, spec):
             peer: blk[:, :, j * plan.nzb : (j + 1) * plan.nzb].contiguous()
             for j, peer in enumerate(cg)
         }
-    recv = _exchange(comm, send)
+    shapes = {
+        r: {peer: (plan.nxs, plan.kyc(r), plan.nzb) for peer in plan.col_group(r)} for r in spec
+    }
+    recv = _exchange(comm, send, shapes)
     xpen = {}
     for r in recv:
         cg = plan.col_group(r)
@@ -177,13 +226,14 @@ def _bwd(plan, comm, spec):
     for r, blk in xpen.items():
         fx = torch.fft.ifft(blk, dim=0)
         rg = plan.row_group(r)
-        cx, _ = d.coords(r)
-        cx * d.nxl
         send[r] = {
             peer: fx[d.coords(peer)[0] * d.nxl : (d.coords(peer)[0] + 1) * d.nxl, :, :].contiguous()
             for peer in rg
         }
-    recv = _exchange(comm, send)
+    shapes = {
+        r: {peer: (d.nxl, plan.kyc(peer), plan.nzb) for peer in plan.row_group(r)} for r in xpen
+    }
+    recv = _exchange(comm, send, shapes)
     ypen = {}
     for r in recv:
         rg = plan.row_group(r)
@@ -199,7 +249,8 @@ def _bwd(plan, comm, spec):
             peer: ry[:, d.coords(peer)[1] * d.nyl : (d.coords(peer)[1] + 1) * d.nyl, :].contiguous()
             for peer in cg
         }
-    recv = _exchange(comm, send)
+    shapes = {r: {peer: (d.nxl, d.nyl, plan.nzb) for peer in plan.col_group(r)} for r in ypen}
+    recv = _exchange(comm, send, shapes)
     out = {}
     for r in recv:
         cg = plan.col_group(r)
