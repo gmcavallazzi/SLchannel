@@ -15,11 +15,21 @@ Markers (declared in pyproject.toml):
     rather than passing vacuously.
 """
 
+import os
+import sys
+
 import pytest
 import torch
 
-from slchannel.semilag import SLAdvector
-from slchannel.utils import generate_grid
+# the repo root, so tests can import the `parallel` package regardless of
+# how pytest was invoked (the bare `pytest` binary does not put cwd on the
+# path, unlike `python -m pytest`)
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from slchannel.semilag import SLAdvector  # noqa: E402  (path hook above)
+from slchannel.utils import generate_grid  # noqa: E402
 
 # Collected across the whole session so the summary can reprint everything.
 _ALL_CHECKS = []
