@@ -10,8 +10,9 @@ Layout per component:
   row 1: x-z cut at mid-span
   row 2: y-z cut at mid-x
   row 3: two x-y cuts, at z+ ~ 15 and z+ ~ 100 (heights set from u_tau)
-u uses a sequential map (viridis); v and w are zero-mean and use a
-symmetric diverging map (RdBu_r) centred at 0.
+All components are plotted as fluctuations about the instantaneous x-y
+plane mean, normalised by u_tau (i.e. q'/u_tau), on the symmetric
+diverging RdBu_r map centred at 0 (decided 2026-08-28).
 
 Usage:
   python tools/plot_snapshot_channel.py results/kmm180_quintic/fields_t00980.npz \
@@ -56,8 +57,7 @@ def main():
         "--Re; the snapshot file does not store it.",
     )
     ap.add_argument("--Re", type=float, default=None, help="bulk Reynolds number; nu = 1/Re.")
-    ap.add_argument("--cmap-u", default="magma", help="colormap for the u component")
-    ap.add_argument("--cmap-vw", default="berlin", help="diverging colormap for v and w")
+    ap.add_argument("--cmap", default="RdBu_r", help="diverging colormap, centred at 0")
     args = ap.parse_args()
 
     d = np.load(args.fields)
@@ -80,13 +80,16 @@ def main():
         )
 
     comps = {
-        "u": (r"u/U_b", args.cmap_u, False),
-        "v": (r"v/U_b", args.cmap_vw, True),
-        "w": (r"w/U_b", args.cmap_vw, True),
+        "u": r"u'/u_\tau",
+        "v": r"v'/u_\tau",
+        "w": r"w'/u_\tau",
     }
+    cmap = args.cmap
 
-    for comp, (label, cmap, sym) in comps.items():
+    for comp, label in comps.items():
         f = cell_center(d[comp], comp)
+        # fluctuation about the instantaneous x-y plane mean, in wall units
+        f = (f - f.mean(axis=(0, 1))) / u_tau
         nx, ny, nz = f.shape
         x = (np.arange(nx) + 0.5) * Lx / nx
         y = (np.arange(ny) + 0.5) * Ly / ny
@@ -98,9 +101,8 @@ def main():
             cuts.append((k, zp))
 
         lo, hi = np.percentile(f, [1, 99])
-        if sym:
-            m = max(abs(lo), abs(hi))
-            lo, hi = -m, m
+        m = max(abs(lo), abs(hi))
+        lo, hi = -m, m
 
         fig = plt.figure(figsize=(13.0, 10.5))
         gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1.35], hspace=0.42, wspace=0.18)
