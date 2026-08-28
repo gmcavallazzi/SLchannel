@@ -10,7 +10,8 @@
 # Parameters derived from the Re950 profile (shown, not guessed):
 #   U_b+ = trapz(U+, y/h) = 19.827  ->  Re = Re_tau * U_b+ = 18517.8
 #   u_tau (code units) = Re_tau/Re = 0.050436
-#   dt for dt+ = 0.2:  dt = 0.2/(u_tau^2 Re) = 4.246e-3
+#   dt for dt+ = 0.2:  dt = 0.2/(u_tau^2 Re) = 4.246e-3  (held constant:
+#   this case runs through the decomposed production driver, which pins dt)
 #   one eddy turnover h/u_tau = 19.83 t.u.; 20 turnovers of stats = 397 t.u.
 #
 # Grid (caps dx+ < 10, dy+ < 5, FFT-friendly counts):
@@ -25,7 +26,19 @@
 # short smoke run first).
 #
 # Seeding: tile the converged M950 field (2pi x pi) 4x in x, 3x in y with
-# a decorrelating perturbation (tool to be written), then interpolate.
+# a decorrelating perturbation, then the interpolate init below brings it
+# onto this grid and projects it:
+#   python tools/tile_field.py data/m950_seed_768x640x320.npz \
+#       --config configs/re950_bigbox_sl_dt020.yaml \
+#       --out results/re950_bigbox_sl_dt020/seed_tiled.npz
+#
+# Warm-up: the tiled field is converged small-box turbulence, so the
+# transient is box-adjustment only; stats start at t+ = 2000 from launch
+# (t = 2000/(u_tau^2 Re) = 42.5) and run 20 eddy turnovers to t_max = 440.
+# Launch (4 GPUs, one rank each):
+#   torchrun --nproc_per_node=4 -m parallel.production \
+#       configs/re950_bigbox_sl_dt020.yaml --px 2 --py 2 --backend dist --bulk local
+# After an interruption relaunch with configs/re950_bigbox_sl_dt020_cont.yaml.
 
 advection:
   scheme: sl
@@ -48,6 +61,10 @@ grid:
   nx: 2560
   ny: 1920
   nz: 320
+initialization:
+  type: interpolate
+  field_file: results/re950_bigbox_sl_dt020/seed_tiled.npz
+  reset_time: true
 output:
   n_out: 50
   n_save: 500
@@ -66,14 +83,14 @@ statistics:
   n_stats: 10
   output_file: turbulence_stats.npz
   state_file: turbulence_stats_state.npz
-  t_stats: 100.0   # placeholder: set from the dpdx flattening criterion
+  t_stats: 42.5
   z_plus_target: 15.0
 time:
   CFL_target: 3.0
-  dt: 0.001
+  dt: 0.004246
   dt_max: 0.004246
   dt_min: 0.0001
-  dt_update_interval: 10
+  dt_update_interval: 0
   n_steps: 2000000000
   scheme: IMEX
-  t_max: 500.0
+  t_max: 440.0

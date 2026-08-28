@@ -65,6 +65,21 @@ DATASETS = {
         ),
         note="Reference DNS profiles at Re_tau = 178.",
     ),
+    "m950_seed": dict(
+        kind="zenodo",
+        # URL filled in when the Zenodo version with this file is published;
+        # until then place the file at data/m950_seed_768x640x320.npz by hand
+        # (the sha256 below verifies it either way).
+        url=None,
+        sha256="63039e8189fad3fc349782073b9f24d555abbd1fdab8ecc3d720d5dd09514df9",
+        dest="m950_seed_768x640x320.npz",
+        size_mb=4851,
+        cite=(
+            "G. M. Cavallazzi, seed fields for slChannel validation, Zenodo, "
+            "CC-BY-4.0. https://doi.org/10.5281/zenodo.22099568"
+        ),
+        note="Converged M950-replica field (Re_tau = 912, 2pi x pi, t = 150.8).",
+    ),
     "kmm180_seed": dict(
         kind="zenodo",
         # Pinned to the VERSION DOI, not the concept DOI: reproducing a result
@@ -232,17 +247,16 @@ def fetch_lm(spec):
 
 
 def fetch_zenodo(name, spec):
-    if not spec.get("url"):
-        sys.exit(
-            f"'{name}' is not downloadable yet: the Zenodo data record has not\n"
-            f"been published, so no URL or checksum is recorded. See\n"
-            f"docs/REPRODUCING.md for the current status and for how to\n"
-            f"regenerate this field locally."
-        )
     dest = os.path.join(DATA, spec["dest"])
-    if os.path.exists(dest) and sha256(dest) == spec["sha256"]:
+    if spec.get("sha256") and os.path.exists(dest) and sha256(dest) == spec["sha256"]:
         print(f"  {dest} already present and verified")
         return dest
+    if not spec.get("url"):
+        sys.exit(
+            f"'{name}' is not downloadable yet: its Zenodo version has not\n"
+            f"been published. Place the file at {dest} by hand and rerun to\n"
+            f"verify it against the recorded checksum."
+        )
     download(spec["url"], dest)
     got = sha256(dest)
     if got != spec["sha256"]:

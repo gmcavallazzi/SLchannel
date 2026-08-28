@@ -137,6 +137,46 @@ python parallel/compare_re180.py results/re180_4rank results/re180_mono
 Multi-node NCCL is not wired up yet; single-node multi-GPU via torchrun
 is the supported deployment.
 
+## The Re950 big-box campaign, end to end
+
+The first production multi-GPU case: the del Alamo & Jimenez 8pi x 3pi
+box at its true Re_tau = 934 (`configs/re950_bigbox_sl_dt020.yaml`
+documents every derived parameter). On a node with 4 GPUs:
+
+```bash
+# 1. the converged small-box seed (Zenodo; or place the file at
+#    data/m950_seed_768x640x320.npz — the checksum verifies either way)
+python tools/fetch_data.py m950_seed
+
+# 2. tile it into the big box with a decorrelating perturbation
+python tools/tile_field.py data/m950_seed_768x640x320.npz \
+    --config configs/re950_bigbox_sl_dt020.yaml \
+    --out results/re950_bigbox_sl_dt020/seed_tiled.npz
+
+# 3. launch (the config already encodes the t+ = 2000 warm-up and the
+#    20-eddy-turnover statistics window to t_max = 440)
+torchrun --nproc_per_node=4 -m parallel.production \
+    configs/re950_bigbox_sl_dt020.yaml --px 2 --py 2 --backend dist --bulk local
+```
+
+Pause anytime with `touch results/re950_bigbox_sl_dt020/STOP`; resume by
+removing it and relaunching with `configs/re950_bigbox_sl_dt020_cont.yaml`
+(same command, different config), which restarts from the checkpoint and
+keeps accumulating the same statistics window.
+
+Figures and validation numbers, whenever statistics exist:
+
+```bash
+python tools/plot_channel_stats.py results/re950_bigbox_sl_dt020 --ref torroja950
+```
+
+(torroja950 expects `data/torroja_re950/Re950.prof`, downloaded from
+https://torroja.dmt.upm.es — not redistributed here. `--ref lm1000` works
+out of the box via `tools/fetch_data.py lm1000`, at a slightly different
+Re_tau.) For a statistics window that excludes early samples
+retroactively, archive accumulator states during the run and subtract:
+`tools/stats_window.py` (see its docstring).
+
 ## Troubleshooting
 
 - `pytest tests/test_semilag_triton.py` asserts the Triton fast path is
