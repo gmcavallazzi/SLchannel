@@ -1,0 +1,79 @@
+# Full channel in the del Alamo & Jimenez "Re950" 8pi x 3pi box at its TRUE
+# friction Reynolds number: the case is labelled Re_tau = 950 but the data
+# give Re_tau = 933.96 (verified from data/torroja_re950/Re950.prof: the
+# y+/(y/h) ratio and the header 'Re_{\tau} = 934').
+#
+# Together with our small-box M950 replica (configs/m950_sl_dt020.yaml,
+# Lozano-Duran & Jimenez 2014 box) this isolates the box-size effect at
+# matched Re_tau, compared against the same Torroja reference profiles.
+#
+# Parameters derived from the Re950 profile (shown, not guessed):
+#   U_b+ = trapz(U+, y/h) = 19.827  ->  Re = Re_tau * U_b+ = 18517.8
+#   u_tau (code units) = Re_tau/Re = 0.050436
+#   dt for dt+ = 0.2:  dt = 0.2/(u_tau^2 Re) = 4.246e-3
+#   one eddy turnover h/u_tau = 19.83 t.u.; 20 turnovers of stats = 397 t.u.
+#
+# Grid (caps dx+ < 10, dy+ < 5, FFT-friendly counts):
+#   nx = 2560 (2^9*5)   -> dx+ = 9.17
+#   ny = 1920 (2^7*3*5) -> dy+ = 4.58
+#   nz =  320, gamma 2.6 -> dz+ = 0.34 (wall) .. 15.4 (centre), same wall
+#                           resolution as the M950 replica
+#
+# Size: 2560 x 1920 x 320 = 1.57e9 points = 12.6 GB per fp64 field;
+# ~250-320 GB resident with the solver's working set — a 4-GPU job
+# (comfortable on 4 x 141 GB, borderline on 4 x 80 GB; calibrate with a
+# short smoke run first).
+#
+# Seeding: tile the converged M950 field (2pi x pi) 4x in x, 3x in y with
+# a decorrelating perturbation (tool to be written), then interpolate.
+
+advection:
+  scheme: sl
+boundary_conditions:
+  top_wall:
+    type: dirichlet
+compute:
+  device: auto
+domain:
+  Lx: 25.132741228718345
+  Ly: 9.42477796076938
+  Lz: 2.0
+  stretching_type: symmetric
+flow:
+  Re: 18517.79
+  Re_tau: 933.96
+  U_bulk: 1.0
+  gamma: 2.6
+grid:
+  nx: 2560
+  ny: 1920
+  nz: 320
+output:
+  n_out: 50
+  n_save: 500
+  results_folder: results/re950_bigbox_sl_dt020
+  t_snapshot: 50.0
+sl:
+  bdf2_pressure: noninc
+  interp_dtype: fp32_accum64
+  interp_order: 6
+  n_traj_iters: 2
+  traj_interp_order: 2
+solver:
+  type: fft
+statistics:
+  enabled: true
+  n_stats: 10
+  output_file: turbulence_stats.npz
+  state_file: turbulence_stats_state.npz
+  t_stats: 100.0   # placeholder: set from the dpdx flattening criterion
+  z_plus_target: 15.0
+time:
+  CFL_target: 3.0
+  dt: 0.001
+  dt_max: 0.004246
+  dt_min: 0.0001
+  dt_update_interval: 10
+  n_steps: 2000000000
+  scheme: IMEX
+  t_max: 500.0
