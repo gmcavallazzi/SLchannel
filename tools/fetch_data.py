@@ -67,18 +67,30 @@ DATASETS = {
     ),
     "m950_seed": dict(
         kind="zenodo",
-        # URL filled in when the Zenodo version with this file is published;
-        # until then place the file at data/m950_seed_768x640x320.npz by hand
-        # (the sha256 below verifies it either way).
-        url=None,
+        # Pinned to the VERSION record (v: Re_tau = 180, 395, 912 seeds).
+        url="https://zenodo.org/records/22142424/files/m950_seed_768x640x320.npz?download=1",
         sha256="63039e8189fad3fc349782073b9f24d555abbd1fdab8ecc3d720d5dd09514df9",
         dest="m950_seed_768x640x320.npz",
         size_mb=4851,
         cite=(
-            "G. M. Cavallazzi, seed fields for slChannel validation, Zenodo, "
-            "CC-BY-4.0. https://doi.org/10.5281/zenodo.22099568"
+            "G. M. Cavallazzi, 'Seed fields for slChannel validation "
+            "(Re_tau = 180, 395, 912)', Zenodo, CC-BY-4.0. "
+            "https://doi.org/10.5281/zenodo.22099568"
         ),
         note="Converged M950-replica field (Re_tau = 912, 2pi x pi, t = 150.8).",
+    ),
+    "re395full_seed": dict(
+        kind="zenodo",
+        url="https://zenodo.org/records/22142424/files/re395full_seed_384x256x200_g26.npz?download=1",
+        sha256="c7cfe0f35ad2b418f9880d18b3d32a498d2b39936d34497f0c4712a97d3f7577",
+        dest="re395full_seed_384x256x200_g26.npz",
+        size_mb=612,
+        cite=(
+            "G. M. Cavallazzi, 'Seed fields for slChannel validation "
+            "(Re_tau = 180, 395, 912)', Zenodo, CC-BY-4.0. "
+            "https://doi.org/10.5281/zenodo.22099568"
+        ),
+        note="Full-channel Re_tau ~ 395 field, gamma = 2.6 grid, t = 150.",
     ),
     "kmm180_seed": dict(
         kind="zenodo",

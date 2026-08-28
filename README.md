@@ -120,7 +120,8 @@ forms.
 
 If you use the validation dataset, cite it separately:
 
-> G. M. Cavallazzi, *seed field SLchannel Re_tau = 180*. Zenodo (CC-BY-4.0).
+> G. M. Cavallazzi, *Seed fields for slChannel validation (Re_tau = 180, 395,
+> 912)*. Zenodo (CC-BY-4.0).
 > https://doi.org/10.5281/zenodo.22099568
 
 Contributions are welcome — see `CONTRIBUTING.md`.
