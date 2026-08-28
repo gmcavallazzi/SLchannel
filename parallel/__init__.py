@@ -39,6 +39,12 @@ Bulk forcing is switchable: 'gathered' (bit-identical to monolithic, full
 allgather per step) or 'local' (allreduced partial sums, the production
 choice on real hardware).
 
+The NCCL path is validated on a 2x A100 PCIe node (2026-08-28, see
+parallel/remote_validation.py): comm primitives bit-exact, 20-step
+production runs within 4e-13 of the monolithic trajectory (a few ulps,
+library-level, same magnitude in every configuration), no speedup yet at
+256^3 over PCIe (0.083 -> 0.093 s/step; ~0.05 s/step overhead to profile).
+
 Still out of scope: the distributed-Thomas transpose reduction (pending a
 hardware profile), decomposed statistics accumulation (rank 0 still
 gathers at the stats cadence), and multi-node runs.

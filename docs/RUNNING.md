@@ -93,9 +93,11 @@ are rank-local and the semi-Lagrangian trajectories need only a fixed halo
   octave-band spectra within a few percent — i.e. within sampling noise).
 - Communication backends: an in-process emulator (all ranks in one
   process, no launcher needed) and `torch.distributed` with gloo
-  (CPU-staged). NCCL on a single shared GPU needs CUDA MPS and is opt-in
-  via `SLC_DIST_BACKEND=nccl`; multi-node NCCL is future work, as is the
-  production driver integration.
+  (CPU-staged) or NCCL (device-staged, one GPU per rank; opt-in via
+  `SLC_DIST_BACKEND=nccl`). The NCCL path is validated on a 2x A100 node
+  (`parallel/remote_validation.py`, 2026-08-28): comm primitives exact,
+  20-step production runs within 4e-13 of the monolithic solver.
+  Multi-node NCCL is future work.
 
 To verify the decomposition on a new machine:
 
