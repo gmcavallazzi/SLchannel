@@ -73,13 +73,15 @@ def _exchange(comm, sendmaps):
         for peer in peers:
             t = my[peer]
             is_c = t.is_complex()
-            send = (torch.view_as_real(t) if is_c else t).contiguous().cpu()
+            send = (torch.view_as_real(t) if is_c else t).contiguous().to(comm.stage_device)
             if peer == me:
                 back = send.clone()
             else:
                 # blocks can be shape-asymmetric (uneven ky chunks):
                 # exchange the shape header first, then the payload
-                hdr_out = torch.tensor(list(send.shape), dtype=torch.int64)
+                hdr_out = torch.tensor(
+                    list(send.shape), dtype=torch.int64, device=comm.stage_device
+                )
                 hdr_in = torch.empty_like(hdr_out)
                 ops = [
                     dist.P2POp(dist.isend, hdr_out, peer, tag=76),
@@ -87,7 +89,9 @@ def _exchange(comm, sendmaps):
                 ]
                 for req in dist.batch_isend_irecv(ops):
                     req.wait()
-                back = torch.empty(tuple(hdr_in.tolist()), dtype=send.dtype)
+                back = torch.empty(
+                    tuple(hdr_in.tolist()), dtype=send.dtype, device=comm.stage_device
+                )
                 ops = [
                     dist.P2POp(dist.isend, send, peer, tag=77),
                     dist.P2POp(dist.irecv, back, peer, tag=77),

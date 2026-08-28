@@ -4,9 +4,10 @@ Both expose the same call surface over `fields: dict[int, Tensor]` mapping
 rank -> extended local array. EmulatedComm holds every rank's tensor in one
 process (exchange = slice copies, deterministic, fast-suite friendly);
 TorchDistComm holds exactly one rank per process and moves the identical
-slabs through torch.distributed (gloo by default, slabs staged through
-contiguous CPU tensors — correctness is the target on a single shared GPU;
-NCCL needs CUDA MPS and is opt-in via SLC_DIST_BACKEND=nccl)."""
+slabs through torch.distributed: gloo stages through contiguous CPU
+tensors (correctness on any device), NCCL stages on the CUDA device
+itself. NCCL on a single shared GPU needs CUDA MPS and is opt-in via
+SLC_DIST_BACKEND=nccl."""
 
 import torch
 
@@ -79,8 +80,10 @@ class EmulatedComm:
 
 class TorchDistComm:
     """One rank per process through torch.distributed. `fields` dicts carry
-    exactly one entry: {my_rank: tensor}. Slabs are staged through contiguous
-    CPU tensors so gloo works regardless of where the fields live."""
+    exactly one entry: {my_rank: tensor}. Message buffers are staged through
+    contiguous tensors on a staging device: CPU under gloo (works regardless
+    of where the fields live), the fields' CUDA device under NCCL (buffers
+    must be device-resident, and staying on-device is the point)."""
 
     def __init__(self, decomp, device="cpu"):
         import torch.distributed as dist
@@ -93,13 +96,17 @@ class TorchDistComm:
         self.rank = dist.get_rank()
         self.local_ranks = [self.rank]
         self.device = torch.device(device)
+        backend = dist.get_backend()
+        self.stage_device = self.device if backend == "nccl" else torch.device("cpu")
+        if backend == "nccl":
+            assert self.device.type == "cuda", "NCCL needs CUDA-resident fields"
 
     def _sendrecv(self, ext, send_sl, recv_sl, dst, src, tag):
         """Send my `send_sl` slab to dst while receiving `recv_sl` from src."""
         if dst == self.rank and src == self.rank:
             ext[recv_sl] = ext[send_sl].clone()
             return
-        send_buf = ext[send_sl].contiguous().cpu()
+        send_buf = ext[send_sl].contiguous().to(self.stage_device)
         recv_buf = torch.empty_like(send_buf)
         ops = [
             self.dist.P2POp(self.dist.isend, send_buf, dst, tag=tag),
@@ -144,13 +151,13 @@ class TorchDistComm:
         nz_nodes = d.ext_shape(comp)[2]
         if self.rank == 0:
             assert nodes is not None, "scatter_nodes needs the full array on rank 0"
-            buf = nodes.to(torch.float64).contiguous().cpu()
+            buf = nodes.to(torch.float64).contiguous().to(self.stage_device)
             assert buf.shape == (d.nx, d.ny, nz_nodes), (
                 f"node array for {comp!r} has shape {tuple(buf.shape)}, "
                 f"expected {(d.nx, d.ny, nz_nodes)}"
             )
         else:
-            buf = torch.empty(d.nx, d.ny, nz_nodes, dtype=torch.float64)
+            buf = torch.empty(d.nx, d.ny, nz_nodes, dtype=torch.float64, device=self.stage_device)
         self.dist.broadcast(buf, src=0)
         full = d.scatter(buf, comp, fill_halos=True)
         return {self.rank: full[self.rank].to(self.device)}
@@ -159,9 +166,9 @@ class TorchDistComm:
         d, H = self.decomp, self.decomp.H
         ext = fields[self.rank]
         if ext.shape[0] != d.nxl:
-            owned = ext[H : H + d.nxl, H : H + d.nyl, :].contiguous().cpu()
+            owned = ext[H : H + d.nxl, H : H + d.nyl, :].contiguous().to(self.stage_device)
         else:
-            owned = ext.contiguous().cpu()
+            owned = ext.contiguous().to(self.stage_device)
         blocks = [torch.empty_like(owned) for _ in range(self.nranks)]
         self.dist.all_gather(blocks, owned)
         full = torch.zeros(d.nx, d.ny, ext.shape[2], dtype=ext.dtype, device=ext.device)
@@ -171,7 +178,7 @@ class TorchDistComm:
         return {self.rank: full}
 
     def allreduce(self, vals, op="sum"):
-        t = torch.as_tensor(vals[self.rank], dtype=torch.float64).cpu().clone()
+        t = torch.as_tensor(vals[self.rank], dtype=torch.float64).to(self.stage_device).clone()
         red_op = self.dist.ReduceOp.SUM if op == "sum" else self.dist.ReduceOp.MAX
         self.dist.all_reduce(t, op=red_op)
         return {self.rank: t}
