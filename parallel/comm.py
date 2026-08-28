@@ -101,9 +101,7 @@ class TorchDistComm:
             assert torch.cuda.is_available(), "NCCL backend needs CUDA"
             # NCCL moves CUDA buffers only; fields may live anywhere (the
             # staging copy brings them to the device)
-            self.stage_device = (
-                self.device if self.device.type == "cuda" else torch.device("cuda")
-            )
+            self.stage_device = self.device if self.device.type == "cuda" else torch.device("cuda")
             # NCCL does not support point-to-point tags; matching relies on
             # posting order, which is deterministic here (symmetric pairs
             # posted in the same order on both sides)

@@ -73,9 +73,7 @@ def _bcast_scalar(x):
     import torch.distributed as dist
 
     dev = torch.device("cuda") if dist.get_backend() == "nccl" else torch.device("cpu")
-    t = torch.tensor(
-        [float(x) if dist.get_rank() == 0 else 0.0], dtype=torch.float64, device=dev
-    )
+    t = torch.tensor([float(x) if dist.get_rank() == 0 else 0.0], dtype=torch.float64, device=dev)
     dist.broadcast(t, src=0)
     return float(t.item())
 
