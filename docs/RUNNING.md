@@ -134,8 +134,11 @@ python parallel/run_re180_4rank.py --mode mono --out results/re180_mono
 python parallel/compare_re180.py results/re180_4rank results/re180_mono
 ```
 
-Multi-node NCCL is not wired up yet; single-node multi-GPU via torchrun
-is the supported deployment.
+Single-node multi-GPU via torchrun is the validated deployment.
+Multi-node works mechanically through torchrun's rendezvous (one torchrun
+per node; `examples/pbs/run_re950_bigbox_2nodes.pbs` is a ready 2x2-GPU
+PBS template) but has not been exercised on real hardware yet — prefer a
+single node whenever one holds enough GPUs.
 
 ## The Re950 big-box campaign, end to end
 

@@ -1,0 +1,93 @@
+#!/bin/bash
+# Re950 big-box run across TWO nodes with 2 GPUs each (4 NCCL ranks total)
+# — EXPERIMENTAL: multi-node NCCL has not been exercised yet; prefer the
+# single-node script (run_re950_bigbox.pbs) whenever a 4-GPU node exists.
+#
+# Same operation as the single-node script (seed fetch, first-launch vs
+# continuation config, STOP hold, self-chaining); the difference is the
+# launcher: one torchrun per node, rendezvousing at the first node.
+#
+#     mkdir -p logs        # once
+#     qsub examples/pbs/run_re950_bigbox_2nodes.pbs
+#
+# If the launch HANGS at startup, NCCL is usually picking the wrong
+# network interface: uncomment and set NCCL_SOCKET_IFNAME below (the
+# cluster docs / `ip link` on a compute node name the interconnect, e.g.
+# ib0), and try NCCL_DEBUG=INFO for the handshake log.
+#
+# ---- EDIT-ME: resources -----------------------------------------------------
+#PBS -N re950_bigbox2n
+#PBS -l select=2:ncpus=16:mem=256gb:ngpus=2:gpu_type=A100
+#PBS -l walltime=24:00:00
+##PBS -q <queue>
+#PBS -j oe
+#PBS -o logs/
+
+set -uo pipefail
+
+# ---- EDIT-ME: repository and environment ------------------------------------
+REPO="${PBS_O_WORKDIR:-$HOME/SLchannel}"
+# every node must activate the same environment; put the activation in
+# ENV_SETUP (it is run through ssh on each node)
+ENV_SETUP="source $HOME/slc-env/bin/activate"
+# ENV_SETUP="module load python && source $HOME/slc-env/bin/activate"
+
+# ---- EDIT-ME: run geometry --------------------------------------------------
+GPUS_PER_NODE=2
+PX=2
+PY=2
+RDZV_PORT=29500
+# export NCCL_SOCKET_IFNAME=ib0      # see the hang note above
+# export NCCL_DEBUG=INFO
+
+# -----------------------------------------------------------------------------
+cd "$REPO"
+mkdir -p logs
+export CC=gcc
+export SLC_DIST_BACKEND=nccl
+
+RES=results/re950_bigbox_sl_dt020
+if [ -f "$RES/STOP" ]; then
+    echo "STOP file present -- run held (rm $RES/STOP to resume)"
+    exit 0
+fi
+if [ -f "$RES/fields_final.npz" ]; then
+    echo "run already complete, nothing to do"
+    exit 0
+fi
+
+python tools/fetch_data.py m950_seed || exit 1
+
+if [ -f "$RES/fields.npz" ]; then
+    CFG=configs/re950_bigbox_sl_dt020_cont.yaml
+else
+    CFG=configs/re950_bigbox_sl_dt020.yaml
+fi
+
+mapfile -t NODES < <(sort -u "$PBS_NODEFILE")
+NNODES=${#NODES[@]}
+MASTER=${NODES[0]}
+echo "=== segment start $(date '+%F %T')  config=$CFG  nodes: ${NODES[*]}"
+
+pids=()
+for i in "${!NODES[@]}"; do
+    ssh "${NODES[$i]}" "cd '$REPO' && $ENV_SETUP && \
+        export CC=gcc SLC_DIST_BACKEND=nccl \
+               ${NCCL_SOCKET_IFNAME:+NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME} \
+               ${NCCL_DEBUG:+NCCL_DEBUG=$NCCL_DEBUG} && \
+        torchrun --nnodes=$NNODES --node_rank=$i --nproc_per_node=$GPUS_PER_NODE \
+            --rdzv_backend=c10d --rdzv_endpoint=$MASTER:$RDZV_PORT \
+            -m parallel.production '$CFG' \
+            --px $PX --py $PY --backend dist --bulk local" &
+    pids+=($!)
+done
+rc=0
+for p in "${pids[@]}"; do
+    wait "$p" || rc=1
+done
+echo "=== segment end rc=$rc $(date '+%F %T')"
+
+if [ ! -f "$RES/fields_final.npz" ] && [ ! -f "$RES/STOP" ] && [ $rc -eq 0 ]; then
+    echo "resubmitting next segment"
+    qsub "$REPO/examples/pbs/run_re950_bigbox_2nodes.pbs"
+fi
