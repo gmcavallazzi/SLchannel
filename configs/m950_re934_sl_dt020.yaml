@@ -1,0 +1,81 @@
+# M950-replica channel (Lozano-Duran & Jimenez 2pi x pi box) at the TRUE
+# Torroja Re_tau: the first M950 campaign ran Re_b = 18000 -> Re_tau =
+# 911.4, and the imposed-934 rescaling experiment showed its residual tail
+# excess was the 911-vs-934 normalization gap. This rerun corrects Re_b.
+#
+# Parameters derived from the Torroja Re950 profile (see
+# configs/re950_bigbox_sl_dt020.yaml for the derivation):
+#   Re = Re_tau * U_b+ = 933.96 * 19.827 = 18517.8, u_tau = 0.050436
+#   dt for dt+ = 0.2: dt = 0.2/(u_tau^2 Re) = 0.2/47.104 = 4.246e-3
+#
+# Seeding: the converged t = 191 field of the first campaign, wall-layer
+# rescaled to the new Re_tau (inner factor s_w = shear_new/shear_old =
+# 1.0207 below z+ = 150, untouched above z+ = 350, smoothstep between):
+#   python tools/retau_rescale.py results/m950_sl_dt020/fields.npz \
+#       --config configs/m950_re934_sl_dt020.yaml \
+#       --re-tau-old 911.4 --re-old 18000 \
+#       --out results/m950_re934_sl_dt020/seed_rescaled.npz
+# The outer turbulence is statistically unchanged at this small Re_tau
+# step, so statistics start after a t+ = 100 settle (t_stats = 2.2).
+#
+# Grid: 768x640x320, gamma 2.6 -> at Re_tau 934: dx+ = 7.64, dy+ = 4.58,
+# dz+ = 0.35 (wall) .. 15.8 (centre). One eddy turnover = 19.8 t.u.;
+# t_max = 400 gives ~20 turnovers of statistics.
+
+advection:
+  scheme: sl
+boundary_conditions:
+  top_wall:
+    type: dirichlet
+compute:
+  device: auto
+domain:
+  Lx: 6.283185307179586
+  Ly: 3.141592653589793
+  Lz: 2.0
+  stretching_type: symmetric
+flow:
+  Re: 18517.79
+  Re_tau: 933.96
+  U_bulk: 1.0
+  gamma: 2.6
+grid:
+  nx: 768
+  ny: 640
+  nz: 320
+initialization:
+  type: vortices
+  field_file: results/m950_re934_sl_dt020/seed_rescaled.npz
+  reset_time: false
+output:
+  n_out: 50
+  n_save: 500
+  results_folder: results/m950_re934_sl_dt020
+  t_snapshot: 25.0
+sl:
+  bdf2_pressure: noninc
+  interp_dtype: fp32_accum64
+  interp_order: 6
+  n_traj_iters: 2
+  traj_interp_order: 2
+solver:
+  type: fft
+statistics:
+  enabled: true
+  n_stats: 10
+  output_file: turbulence_stats.npz
+  state_file: turbulence_stats_state.npz
+  spectra_z_planes:
+  - 100.0
+  - 500.0
+  t_stats: 2.2
+  z_plus_target: 15.0
+time:
+  CFL_target: 3.0
+  dt: 0.004246
+  dt_max: 0.004246
+  dt_min: 0.0001
+  dt_update_interval: 0
+  n_steps: 2000000000
+  scheme: IMEX
+  t_max: 400.0
